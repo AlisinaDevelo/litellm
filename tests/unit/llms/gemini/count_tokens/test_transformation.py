@@ -643,15 +643,19 @@ async def test_build_count_tokens_payload_rejects_a_tool_result_without_its_tool
     ),
 )
 async def test_remote_image_is_fetched_without_blocking_the_event_loop(monkeypatch, message_format, image_block):
+    ticks: list[float] = []  # mutable-ok: the ticker records each wake-up time
+    ticks_while_fetching: list[int] = []  # mutable-ok: the image host records how far the ticker got during its sleep
+
     async def slow_image_host(request: httpx.Request) -> httpx.Response:
+        before = len(ticks)
         await asyncio.sleep(0.3)
+        ticks_while_fetching.append(len(ticks) - before)
         return httpx.Response(200, content=base64.b64decode(_PNG), headers={"content-type": "image/png"})
 
     image_client = AsyncHTTPHandler()
     image_client.client = httpx.AsyncClient(transport=httpx.MockTransport(slow_image_host))
     monkeypatch.setattr(litellm, "module_level_aclient", image_client)
     monkeypatch.setattr(litellm, "user_url_validation", False)
-    ticks: list[float] = []  # mutable-ok: the ticker records each wake-up time
     loop = asyncio.get_running_loop()
 
     async def ticker() -> None:
@@ -673,4 +677,4 @@ async def test_remote_image_is_fetched_without_blocking_the_event_loop(monkeypat
 
     assert isinstance(payload, GeminiCountTokensPayload), payload
     assert payload.contents[0]["parts"][1]["inline_data"]["data"] == _PNG
-    assert max(later - earlier for earlier, later in zip(ticks, ticks[1:])) < 0.15
+    assert ticks_while_fetching and ticks_while_fetching[0] >= 10, ticks_while_fetching

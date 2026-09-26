@@ -9,7 +9,9 @@ from pydantic import TypeAdapter
 from litellm.litellm_core_utils.asyncify import asyncify
 from litellm.litellm_core_utils.prompt_templates.image_handling import async_inline_remote_media
 from litellm.llms.anthropic.common_utils import sanitize_replayed_anthropic_messages
-from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import AnthropicAdapter
+from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
+    LiteLLMAnthropicMessagesAdapter,
+)
 from litellm.llms.gemini.chat.transformation import GoogleAIStudioGeminiConfig
 from litellm.llms.vertex_ai.common_utils import get_supports_system_message
 from litellm.llms.vertex_ai.gemini.transformation import (
@@ -17,6 +19,7 @@ from litellm.llms.vertex_ai.gemini.transformation import (
     _openai_messages_may_need_sync_gcs_metadata_fetch,  # pyright: ignore[reportPrivateUsage]  # shared chat-path check
     _transform_system_message,  # pyright: ignore[reportPrivateUsage]  # shared chat-path system splitter
 )
+from litellm.types.llms.anthropic import AnthropicMessagesRequest
 from litellm.types.llms.vertex_ai import ContentType, SystemInstructions, Tools
 from litellm.types.utils import AllMessageValues, CountTokensMessageFormat
 
@@ -33,7 +36,7 @@ class InvalidCountTokensRequest:
     message: str
 
 
-_ANTHROPIC_ADAPTER: Final = AnthropicAdapter()
+_ANTHROPIC_ADAPTER: Final = LiteLLMAnthropicMessagesAdapter()
 _JSON_OBJECT: Final = TypeAdapter(dict[str, object])
 _JSON_ARRAY: Final = TypeAdapter(list[object])
 
@@ -110,21 +113,19 @@ async def _anthropic_payload(
     messages: Sequence[Mapping[str, object]],
     system: object | None,
     tools: Sequence[Mapping[str, object]] | None,
-) -> GeminiCountTokensPayload | InvalidCountTokensRequest:
-    request: Final = _json_object_copy(
-        MappingProxyType(
-            {key: value for key, value in (("model", model), ("system", system), ("tools", tools)) if value}
+) -> GeminiCountTokensPayload:
+    request: Final = cast(  # cast-ok: the same unvalidated dict the /v1/messages adapter builds its request from
+        AnthropicMessagesRequest,
+        _json_object_copy(
+            MappingProxyType(
+                {key: value for key, value in (("model", model), ("system", system), ("tools", tools)) if value}
+            )
         )
+        | {"messages": sanitize_replayed_anthropic_messages(_json_array_copy(messages))},
     )
-    openai_request, _ = _ANTHROPIC_ADAPTER.translate_completion_input_params_with_tool_mapping(
-        {  # mutable-ok: the adapter pops model and messages out of the dict it is given
-            **request,
-            "messages": sanitize_replayed_anthropic_messages(_json_array_copy(messages)),
-        },
-        custom_llm_provider="gemini",
+    openai_request, _ = _ANTHROPIC_ADAPTER.translate_anthropic_to_openai(
+        anthropic_message_request=request, custom_llm_provider="gemini"
     )
-    if openai_request is None:
-        return InvalidCountTokensRequest(message="Anthropic request could not be translated for Gemini")
     return await _payload_like_chat(
         model=model,
         messages=openai_request["messages"],

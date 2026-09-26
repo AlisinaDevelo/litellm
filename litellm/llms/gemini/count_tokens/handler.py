@@ -69,8 +69,6 @@ class GoogleAIStudioTokenCounter:
             return contents
 
         cleaned_contents: Final = copy.deepcopy(contents)
-        if not isinstance(cleaned_contents, (list, tuple)):
-            return cleaned_contents
 
         for content in cleaned_contents:
             parts = content.get("parts") if isinstance(content, dict) else None
