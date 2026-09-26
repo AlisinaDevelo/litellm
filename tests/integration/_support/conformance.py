@@ -36,17 +36,20 @@ def read_checks(directory: Path, scenario: str) -> tuple[ConformanceCheck, ...]:
     checks: Final = TypeAdapter(tuple[ConformanceCheck, ...]).validate_json(reports[0].read_bytes())
     assert len({check.id for check in checks}) == len(checks), f"conformance {scenario}: duplicate checks"
     required: Final = {
-        "dns-rebinding-protection": ("localhost-host-rebinding-rejected", "localhost-host-valid-accepted"),
         "server-session-lifecycle": (
             "server-session-initialized-accepted",
             "server-session-delete-accepted",
             "server-session-terminated-returns-404",
         ),
-        "server-sse-multiple-streams": ("server-accepts-multiple-post-streams", "server-sse-streams-functional"),
+        "server-sse-multiple-streams": (
+            "server-accepts-multiple-post-streams",
+            "server-sse-streams-functional",
+            "wire-schema-valid",
+        ),
         "server-initialize": ("server-initialize", "server-session-id-visible-ascii", "wire-schema-valid"),
         "tools-list": ("tools-list", "tools-name-format", "wire-schema-valid"),
         "tools-call-image": ("tools-call-image", "wire-schema-valid"),
-    }.get(scenario, (scenario,))
+    }.get(scenario, (scenario, "wire-schema-valid") if scenario in OFFICIAL_SCENARIOS else (scenario,))
     for identity in required:
         assert tuple(check.status for check in checks if check.id == identity) == ("SUCCESS",), (
             f"conformance {scenario}: required check {identity} did not pass: {checks}"
@@ -246,7 +249,6 @@ OFFICIAL_SCENARIOS: Final = (
     "server-session-lifecycle",
     "server-sse-multiple-streams",
     "ping",
-    "dns-rebinding-protection",
     "tools-list",
     "tools-call-image",
     "tools-call-audio",
@@ -289,6 +291,12 @@ def required_conformance_nodes() -> tuple[str, ...]:
         official
         + matrix
         + ("tests/integration/mcp/test_mcp_protocol_errors.py::test_omitted_tool_arguments_reach_the_upstream",)
+        + tuple(
+            "tests/integration/mcp/test_mcp_protocol_errors.py::test_configured_origin_policy_rejects_before_tool_execution["
+            + ingress
+            + "]"
+            for ingress in ("server_mcp", "sse")
+        )
         + tuple(
             "tests/integration/mcp/test_mcp_official_conformance.py::" + name
             for name in (

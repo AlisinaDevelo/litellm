@@ -66,6 +66,9 @@ Coverage is deliberately explicit:
   cases. This limitation cannot be treated as a successful official simple-text result.
 - The schema scenario looks up an unprefixed fixture name. A direct/gateway SDK comparison
   instead requires the full JSON Schema 2020-12 input schema to survive unchanged.
+- The official DNS-rebinding scenario explicitly targets unauthenticated localhost servers.
+  This authenticated gateway instead has explicit allowed/denied Origin execution cases with
+  `LITELLM_CORS_ORIGINS` configured, covering HTTP and SSE. The default wildcard is unchanged.
 - Logging, completion, resource subscriptions, sampling and elicitation are not advertised by
   this gateway contract; their capability-specific scenarios do not establish legacy support.
   Modern 2026-07-28 and extension scenarios belong to later activation gates.

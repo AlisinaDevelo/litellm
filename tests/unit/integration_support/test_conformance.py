@@ -224,26 +224,6 @@ def test_unrelated_rpc_response_cannot_supply_negotiation() -> None:
 def test_only_initialize_is_captured(body: bytes, expected: bool) -> None:
     assert is_initialization(body) is expected
 
-
-def test_official_security_scenario_requires_both_rejection_and_allowed_control(tmp_path: Path) -> None:
-    (tmp_path / "checks.json").write_text(
-        json.dumps(
-            [
-                {"id": "localhost-host-rebinding-rejected", "status": "SUCCESS"},
-                {"id": "localhost-host-valid-accepted", "status": "SUCCESS"},
-            ]
-        )
-    )
-    assert len(read_checks(tmp_path, "dns-rebinding-protection")) == 2
-
-
-@pytest.mark.parametrize("identity", ("localhost-host-rebinding-rejected", "localhost-host-valid-accepted"))
-def test_security_control_cannot_pass_without_its_counterpart(tmp_path: Path, identity: str) -> None:
-    (tmp_path / "checks.json").write_text(json.dumps([{"id": identity, "status": "SUCCESS"}]))
-    with pytest.raises(AssertionError, match="required check"):
-        read_checks(tmp_path, "dns-rebinding-protection")
-
-
 @pytest.mark.parametrize(
     "scenario,identities",
     (
@@ -255,7 +235,10 @@ def test_security_control_cannot_pass_without_its_counterpart(tmp_path: Path, id
                 "server-session-terminated-returns-404",
             ),
         ),
-        ("server-sse-multiple-streams", ("server-accepts-multiple-post-streams", "server-sse-streams-functional")),
+        (
+            "server-sse-multiple-streams",
+            ("server-accepts-multiple-post-streams", "server-sse-streams-functional", "wire-schema-valid"),
+        ),
     ),
 )
 def test_complete_transport_checks_pass_and_missing_checks_fail(
