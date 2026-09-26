@@ -18,6 +18,7 @@ from litellm.constants import (
     DEFAULT_MAX_LRU_CACHE_SIZE,
     DEFAULT_REPLICATE_GPU_PRICE_PER_SECOND,
 )
+from litellm.litellm_core_utils.cost_discount import resolve_cost_discount
 from litellm.litellm_core_utils.llm_cost_calc.tool_call_cost_tracking import (
     StandardBuiltInToolCostTracking,
 )
@@ -1050,6 +1051,7 @@ def _infer_call_type(call_type: CallTypesLiteral | None, completion_response: ob
 def _apply_cost_discount(
     base_cost: float,
     custom_llm_provider: str | None,
+    model: str | None = None,
 ) -> tuple[float, float, float]:
     """
     Apply provider-specific cost discount from module-level config.
@@ -1057,17 +1059,17 @@ def _apply_cost_discount(
     Args:
         base_cost: The base cost before discount
         custom_llm_provider: The LLM provider name
+        model: The model name, used to resolve <provider>/<model-pattern> discount keys
 
     Returns:
         Tuple of (final_cost, discount_percent, discount_amount)
     """
     original_cost: Final = base_cost
-    discount_percent = 0.0
-    discount_amount = 0.0
+    resolved_discount: Final = resolve_cost_discount(litellm.cost_discount_config, custom_llm_provider, model)
+    discount_percent: Final = 0.0 if resolved_discount is None else resolved_discount
+    discount_amount: Final = original_cost * discount_percent
 
-    if custom_llm_provider and custom_llm_provider in litellm.cost_discount_config:
-        discount_percent = litellm.cost_discount_config[custom_llm_provider]
-        discount_amount = original_cost * discount_percent
+    if resolved_discount is not None:
         final_cost: Final = original_cost - discount_amount
 
         if verbose_logger.isEnabledFor(logging.DEBUG):
@@ -1659,6 +1661,7 @@ def completion_cost(
                     ) = _apply_cost_discount(
                         base_cost=_final_cost,
                         custom_llm_provider=custom_llm_provider,
+                        model=model,
                     )
 
                     # Apply margin from module-level config if configured
@@ -1826,6 +1829,7 @@ def completion_cost(
                     ) = _apply_cost_discount(
                         base_cost=_final_cost,
                         custom_llm_provider=custom_llm_provider,
+                        model=model,
                     )
                 else:
                     discount_percent = 0.0

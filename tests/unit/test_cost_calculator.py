@@ -1532,6 +1532,58 @@ def test_cost_discount_vertex_ai(monkeypatch):
     print(f"  - Savings: ${cost_without_discount - cost_with_discount:.6f}")
 
 
+def test_cost_discount_model_pattern_beats_bare_provider(monkeypatch):
+    """
+    Test that a <provider>/<model-pattern> discount key applies only to matching models
+    """
+    from litellm import completion_cost
+    from litellm.types.utils import Usage
+
+    claude_response = ModelResponse(
+        id="test-id",
+        choices=[],
+        created=1234567890,
+        model="claude-sonnet-4-5",
+        object="chat.completion",
+        usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+    )
+    gemini_response = ModelResponse(
+        id="test-id",
+        choices=[],
+        created=1234567890,
+        model="gemini-3-pro-preview",
+        object="chat.completion",
+        usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+    )
+
+    monkeypatch.setattr(litellm, "cost_discount_config", {})
+    claude_undiscounted = completion_cost(
+        completion_response=claude_response,
+        model="vertex_ai/claude-sonnet-4-5",
+        custom_llm_provider="vertex_ai",
+    )
+    gemini_undiscounted = completion_cost(
+        completion_response=gemini_response,
+        model="vertex_ai/gemini-3-pro-preview",
+        custom_llm_provider="vertex_ai",
+    )
+
+    monkeypatch.setattr(litellm, "cost_discount_config", {"vertex_ai/claude-*": 0.2, "vertex_ai": 0.05})
+    claude_discounted = completion_cost(
+        completion_response=claude_response,
+        model="vertex_ai/claude-sonnet-4-5",
+        custom_llm_provider="vertex_ai",
+    )
+    gemini_discounted = completion_cost(
+        completion_response=gemini_response,
+        model="vertex_ai/gemini-3-pro-preview",
+        custom_llm_provider="vertex_ai",
+    )
+
+    assert claude_discounted == pytest.approx(claude_undiscounted * 0.8, rel=1e-9)
+    assert gemini_discounted == pytest.approx(gemini_undiscounted * 0.95, rel=1e-9)
+
+
 def test_cost_discount_not_applied_to_other_providers(monkeypatch):
     """
     Test that cost discount only applies to configured providers
