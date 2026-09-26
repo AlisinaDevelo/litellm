@@ -347,11 +347,11 @@ postgresql:
   auth:
     username: litellm
     database: litellm
-    # Required when enabled, with no default: the chart copies it into the
-    # `<fullname>-dbcredentials` Secret the application reads, and the subchart
-    # sets it as the password of `username`. Supply it from a values file kept
-    # out of Git or with --set postgresql.auth.password=...
-    password: ""
+    # `auth.password` is required when enabled and deliberately has no default
+    # here: the chart copies it into the `<fullname>-dbcredentials` Secret the
+    # application reads, and the subchart sets it as the password of
+    # `username`. Supply it from a values file kept out of Git or with
+    # --set postgresql.auth.password=...
 
 # Redis is the proxy's coordination store: cross-pod tpm/rpm rate limits,
 # spend tracking, and the pod lock manager. The chart emits REDIS_HOST /
