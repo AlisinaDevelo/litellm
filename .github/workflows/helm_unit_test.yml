@@ -39,9 +39,6 @@ jobs:
           tar -xzf "$RUNNER_TEMP/helm-unittest.tgz" -C "$PLUGIN_DIR"
           helm plugin list
 
-      - name: Build chart dependencies
-        run: helm dependency build helm/litellm
-
       - name: Run unit tests
         run: |
           chart=helm/litellm

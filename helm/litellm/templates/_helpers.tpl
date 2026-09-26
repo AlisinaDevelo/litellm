@@ -112,112 +112,19 @@ Secret the chart generates when `masterKey.generate` is true.
 {{- end -}}
 
 {{/*
-Bundled PostgreSQL wiring. The subchart Service is `<release>-postgresql`
-and the chart creates `<fullname>-dbcredentials` from postgresql.auth so
-the application pods read username + password from one Secret.
-*/}}
-{{- define "litellm.postgresql.credentialsSecretName" -}}
-{{- printf "%s-dbcredentials" (include "litellm.fullname" .) -}}
-{{- end -}}
-
-{{- define "litellm.postgresql.serviceName" -}}
-{{- printf "%s-%s" .Release.Name (default "postgresql" .Values.postgresql.nameOverride | trunc 63 | trimSuffix "-") -}}
-{{- end -}}
-
-{{/*
-Reject an unpinned image tag for the bundled PostgreSQL. A floating tag lets
-a chart upgrade start a newer PostgreSQL major against the existing
-PersistentVolumeClaim, which the server refuses to open and which cannot be
-undone in place.
-*/}}
-{{- define "litellm.validateBundledPostgresImageTag" -}}
-{{- $tag := .Values.postgresql.image.tag | default "" | toString -}}
-{{- $digest := .Values.postgresql.image.digest | default "" | toString -}}
-{{- if and (eq $digest "") (or (eq $tag "") (eq $tag "latest")) -}}
-{{- fail (printf "postgresql.image.tag must be pinned to an explicit version when postgresql.enabled is true (got %q). An unpinned tag can start a different PostgreSQL major against the existing data directory, which makes the database unreadable and is not recoverable in place. Crossing a major version requires a dump and restore." $tag) -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Writer connection pieces: the bundled PostgreSQL when postgresql.enabled,
-otherwise database.writer. Returns a dict with host, port, dbname and the
-passwordSecret triple so `litellm.serverEnv` renders both the same way.
+Writer connection pieces as a dict (host, port, dbname, passwordSecret, ...)
+so `litellm.serverEnv` renders them in one place.
 */}}
 {{- define "litellm.database.writer" -}}
-{{- if .Values.postgresql.enabled -}}
-{{- if .Values.database.writer.host -}}
-{{- fail "postgresql.enabled and database.writer.host are mutually exclusive: the bundled PostgreSQL provides the writer, so leave database.writer.host empty or disable the subchart" -}}
-{{- end -}}
-{{- $writer := deepCopy .Values.database.writer -}}
-{{- $_ := set $writer "host" (include "litellm.postgresql.serviceName" .) -}}
-{{- $_ := set $writer "port" (dig "primary" "service" "ports" "postgresql" 5432 .Values.postgresql) -}}
-{{- $_ := set $writer "dbname" (.Values.postgresql.auth.database | default "litellm") -}}
-{{- $_ := set $writer "passwordSecret" (dict "name" (include "litellm.postgresql.credentialsSecretName" .) "usernameKey" "username" "passwordKey" "password") -}}
-{{- toYaml $writer -}}
-{{- else -}}
 {{- toYaml .Values.database.writer -}}
 {{- end -}}
-{{- end -}}
 
 {{/*
-Bundled Redis wiring. The subchart only serves sentinel in "replication"
-architecture, and in that mode the sentinel Service is `<release>-redis`
-rather than `<release>-redis-master`.
-*/}}
-{{- define "litellm.redis.serviceName" -}}
-{{- $name := default "redis" .Values.redis.nameOverride | trunc 63 | trimSuffix "-" -}}
-{{- if .Values.redis.sentinel.enabled -}}
-{{- printf "%s-%s" .Release.Name $name -}}
-{{- else -}}
-{{- printf "%s-%s-master" .Release.Name $name -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "litellm.redis.bundledPort" -}}
-{{- if .Values.redis.sentinel.enabled -}}
-{{- dig "sentinel" "service" "ports" "sentinel" 26379 .Values.redis -}}
-{{- else -}}
-{{- dig "master" "service" "ports" "redis" 6379 .Values.redis -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-The subchart's auth Secret: `auth.existingSecret` when the operator supplies
-one, otherwise the `<release>-redis` Secret the subchart creates, keyed by
-`redis-password`.
-*/}}
-{{- define "litellm.redis.bundledSecretName" -}}
-{{- $existing := dig "auth" "existingSecret" "" .Values.redis -}}
-{{- if $existing -}}
-{{- $existing -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name (default "redis" .Values.redis.nameOverride | trunc 63 | trimSuffix "-") -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "litellm.redis.bundledSecretKey" -}}
-{{- dig "auth" "existingSecretPasswordKey" "" .Values.redis | default "redis-password" -}}
-{{- end -}}
-
-{{/*
-Coordination Redis pieces: the bundled Redis when redis.enabled, otherwise
-the external redis.host block. Returns a dict with host, port, cluster and
-the passwordSecret pair; empty host means no Redis.
+Coordination Redis pieces: host, port, cluster and the passwordSecret pair.
+An empty host means no Redis.
 */}}
 {{- define "litellm.redis.connection" -}}
-{{- if .Values.redis.enabled -}}
-{{- if .Values.redis.host -}}
-{{- fail "redis.enabled and redis.host are mutually exclusive: the bundled Redis provides the coordination store, so leave redis.host empty or disable the subchart" -}}
-{{- end -}}
-{{- $auth := dig "auth" "enabled" true .Values.redis -}}
-{{- $secret := dict "name" "" "passwordKey" "" -}}
-{{- if $auth -}}
-{{- $secret = dict "name" (include "litellm.redis.bundledSecretName" .) "passwordKey" (include "litellm.redis.bundledSecretKey" .) -}}
-{{- end -}}
-{{- toYaml (dict "host" (include "litellm.redis.serviceName" .) "port" (include "litellm.redis.bundledPort" .) "cluster" false "passwordSecret" $secret) -}}
-{{- else -}}
 {{- toYaml (dict "host" .Values.redis.host "port" .Values.redis.port "cluster" .Values.redis.cluster "passwordSecret" .Values.redis.passwordSecret) -}}
-{{- end -}}
 {{- end -}}
 
 {{- define "litellm.fullname" -}}
@@ -458,7 +365,7 @@ IAM_TOKEN_DB_AUTH / AZURE_POSTGRESQL_AUTH toggle that only the writer sets.
 {{- end }}
 {{- with (fromYaml (include "litellm.database.writer" $root)) }}
 - name: DATABASE_HOST
-  value: {{ required "database.writer.host is required (or set postgresql.enabled: true for the bundled database)" .host | quote }}
+  value: {{ required "database.writer.host is required" .host | quote }}
 - name: DATABASE_PORT
   value: {{ .port | default 5432 | quote }}
 - name: DATABASE_USER

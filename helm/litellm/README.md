@@ -9,12 +9,11 @@ Both layouts run the same image. The image entrypoint dispatches on the first co
 
 ## Requirements
 
-Kubernetes 1.25+ and Helm 3.8+ (the dependencies are OCI charts). The proxy needs a PostgreSQL database, either your own through `database.writer.*` or the bundled Bitnami subchart with `postgresql.enabled: true` (evaluation only), and a master key, either an existing Secret named by `masterKey.secretName` or one the chart generates with `masterKey.generate: true`
+Kubernetes 1.25+ and Helm 3.8+. The chart has no subcharts: bring your own PostgreSQL (`database.writer.*`) and, optionally, Redis (`redis.*`). The proxy also needs a master key, either an existing Secret named by `masterKey.secretName` or one the chart generates with `masterKey.generate: true`
 
 ## Install
 
 ```bash
-helm dependency build helm/litellm
 kubectl create secret generic litellm-master-key-secret --from-literal=master-key=sk-change-me
 helm install litellm helm/litellm \
   --set database.writer.host=postgres.example.com \
@@ -27,12 +26,12 @@ The image tag defaults to the chart's `appVersion`. Override it with `image.tag`
 ## Monolith quickstart
 
 ```bash
-helm dependency build helm/litellm
 helm install litellm helm/litellm \
   --set monolith.enabled=true \
   --set masterKey.generate=true \
-  --set postgresql.enabled=true \
-  --set postgresql.auth.password=change-me
+  --set database.writer.host=postgres.example.com \
+  --set database.writer.dbname=litellm \
+  --set database.writer.passwordSecret.name=litellm-db-secret
 kubectl port-forward svc/litellm-litellm 4000:4000
 ```
 
@@ -45,14 +44,9 @@ With `monolith.enabled: true`:
 - the Ingress sends every path, built in or from `ingress.extraPaths`, to the monolith Service
 - the migrations Job renders exactly as in componentized mode
 
-## Optional bundled datastores
-
-`postgresql.enabled` and `redis.enabled` pull the Bitnami subcharts declared in `Chart.yaml` (Helm `condition:` gating, off by default). When on, the chart wires `DATABASE_*` and `REDIS_*` into every workload from the subchart Services and Secrets, so `database.writer.host` and `redis.host` must stay empty. The bundled images are pinned to `bitnamilegacy/*` tags; the render fails on an empty or `latest` PostgreSQL tag unless a digest is set
-
 ## Testing
 
 ```bash
-helm dependency build helm/litellm
 helm lint helm/litellm
 helm unittest -f 'tests/*.yaml' helm/litellm
 helm test <release> --logs
@@ -76,9 +70,8 @@ The `litellm-helm` chart (`oci://ghcr.io/berriai/litellm-helm`) is retired; its 
 | `db.useExisting`, `db.endpoint`, `db.database`, `db.secret.*` | `database.writer.host`, `database.writer.port`, `database.writer.dbname`, `database.writer.passwordSecret.*` |
 | `db.readReplicaUrl` / `db.secret.readReplica*` | `database.reader.*` |
 | `db.connectionPool.*` | `database.connectionPool.*` |
-| `db.deployStandalone: true` | `postgresql.enabled: true` (plus `postgresql.auth.password`) |
-| `postgresql.*` | `postgresql.*` (unchanged subchart values) |
-| `redis.enabled: true` (bundled) | `redis.enabled: true` (bundled, unchanged subchart values) |
+| `db.deployStandalone: true` / `postgresql.*` | removed: the chart ships no PostgreSQL, point `database.writer.*` at your own |
+| `redis.enabled: true` (bundled) | removed: the chart ships no Redis, point `redis.host` at your own |
 | external Redis via `envVars` | `redis.host`, `redis.port`, `redis.passwordSecret.*`, `redis.cluster` |
 | `envVars` / `extraEnvVars` | `gateway.extraEnv` (list of `name` / `value` or `valueFrom` entries) |
 | `environmentSecrets` | `gateway.envSecrets` |

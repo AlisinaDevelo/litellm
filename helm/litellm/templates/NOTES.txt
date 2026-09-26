@@ -35,8 +35,7 @@ Reminders:
   - Sensitive values come from Secret references only. Before installing, set:
       - masterKey.secretName                                   (Secret with the proxy master key, or
                                                                 masterKey.generate: true to let the chart create one)
-      - database.writer.{host,port,dbname}                     (writer connection pieces, or postgresql.enabled: true
-                                                                for the bundled evaluation database)
+      - database.writer.{host,port,dbname}                     (writer connection pieces)
       - database.writer.passwordSecret.{name,usernameKey,passwordKey}
                                                                (Secret holding the writer DB username + password)
       - database.writer.useIAMAuth: true                       (optional: chart sets IAM_TOKEN_DB_AUTH=true and
@@ -50,7 +49,7 @@ Reminders:
                                                                 omits DATABASE_PASSWORD_READ_REPLICA /
                                                                 DATABASE_URL_READ_REPLICA so the proxy mints the
                                                                 reader URL from an IAM token at startup)
-      - redis.host or redis.enabled: true                      (external Redis, or the bundled Redis subchart)
+      - redis.host                                             (optional: the proxy's coordination Redis)
       - redis.passwordSecret.name                              (optional: set when redis.host is provided and the
                                                                 cache requires auth)
       - redis.cluster: true                                    (optional: chart sets REDIS_CLUSTER_NODES from

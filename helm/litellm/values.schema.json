@@ -144,22 +144,12 @@
         }
       }
     },
-    "postgresql": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        }
-      }
-    },
+    "postgresql": false,
     "redis": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
+        "enabled": false,
         "cluster": {
           "type": "boolean"
         },

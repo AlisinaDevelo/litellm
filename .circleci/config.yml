@@ -1622,8 +1622,13 @@ jobs:
       - run:
           name: Run helm lint
           command: |
-            helm dependency build ./helm/litellm
             helm lint ./helm/litellm -f ./helm/litellm/ci/test-values.yaml
+
+      - run:
+          name: Start PostgreSQL for the chart
+          command: |
+            kubectl apply -f ./helm/litellm/ci/postgres.yaml
+            kubectl rollout status deployment/litellm-ci-postgres --timeout=3m
 
       - run:
           name: Run helm tests

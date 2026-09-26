@@ -150,12 +150,6 @@ migrationJob:
   # while the Argo CD hook is on leaves the Job out of Helm's own upgrade
   # path, which is what Argo CD users want since Argo, not Helm, applies the
   # manifests.
-  #
-  # With `postgresql.enabled: true` the Helm hook is not rendered even when
-  # `helm.enabled` is true: a pre-install hook has to finish before the
-  # bundled PostgreSQL is created, so the Job would wait for a database that
-  # cannot exist yet. The Job then installs as an ordinary resource and
-  # retries (`backoffLimit`) until the database accepts connections.
   hooks:
     helm:
       enabled: true
@@ -257,13 +251,8 @@ billingMetrics:
   caSecretName: ""                                    # existing Secret holding ca.crt
   exportIntervalMs: ""                                # push cadence; the proxy defaults to 60000
 
-# Postgres connection. Point `writer` at your own database, or set
-# `postgresql.enabled: true` below to deploy the bundled Bitnami PostgreSQL
-# subchart: the chart then fills in `writer.host` (`<release>-postgresql`),
-# `writer.dbname` (`postgresql.auth.database`) and `writer.passwordSecret`
-# (a `<release>-litellm-dbcredentials` Secret it creates from
-# `postgresql.auth.username` / `postgresql.auth.password`), and refuses a
-# `writer.host` set at the same time.
+# Postgres connection. The chart ships no database; point `writer` at your
+# own PostgreSQL (managed or self hosted) and its credentials Secret.
 database:
   writer:
     host: ""
@@ -319,97 +308,29 @@ database:
     maxDbConnections: 20
     maxClientConn: 1000
 
-# Optional bundled PostgreSQL (Bitnami subchart, off by default). Meant for
-# evaluation and CI; production installs should point `database.writer` at a
-# managed database instead. Every key here except `enabled` is passed to the
-# subchart.
-#
-# Bitnami retired the versioned tags under docker.io/bitnami and republished
-# the archived builds under docker.io/bitnamilegacy, so the subchart's own
-# image defaults no longer resolve. Keep the tag pinned: a floating tag can
-# start a newer PostgreSQL major against the existing data directory, which
-# leaves the server refusing to boot with no way back other than a dump taken
-# beforehand. The chart refuses to render an unpinned tag for this reason.
-postgresql:
-  enabled: false
-  architecture: standalone
-  image:
-    repository: bitnamilegacy/postgresql
-    tag: 16.2.0-debian-12-r6
-  volumePermissions:
-    image:
-      repository: bitnamilegacy/os-shell
-      tag: 12-debian-12-r16
-  metrics:
-    image:
-      repository: bitnamilegacy/postgres-exporter
-      tag: 0.15.0-debian-12-r14
-  auth:
-    username: litellm
-    database: litellm
-    # `auth.password` is required when enabled and deliberately has no default
-    # here: the chart copies it into the `<fullname>-dbcredentials` Secret the
-    # application reads, and the subchart sets it as the password of
-    # `username`. Supply it from a values file kept out of Git or with
-    # --set postgresql.auth.password=...
-
 # Redis is the proxy's coordination store: cross-pod tpm/rpm rate limits,
 # spend tracking, and the pod lock manager. The chart emits REDIS_HOST /
 # REDIS_PORT / REDIS_PASSWORD, which the proxy picks up through its
 # coordination Redis env fallback. Response caching is separate and off unless
 # you enable it in `proxy_config.litellm_settings.cache`.
 #
-# Two ways to get one:
-#   - external: set `host` (and `passwordSecret.name` when auth is required).
-#     Set `cluster: true` for Redis Cluster mode (AWS ElastiCache Cluster,
-#     self-hosted Redis Cluster): the chart emits REDIS_CLUSTER_NODES from
-#     `host` / `port` as the single seed and the client discovers the rest
-#     from CLUSTER SLOTS.
-#   - bundled: set `enabled: true` to deploy the Bitnami Redis subchart. The
-#     chart then points REDIS_HOST at `<release>-redis-master` (or the
-#     sentinel Service when `sentinel.enabled`), REDIS_PORT at the subchart's
-#     port and REDIS_PASSWORD at the subchart's auth Secret, and refuses a
-#     `host` set at the same time. Every other key under `redis` is passed to
-#     the subchart; the image repositories carry the same bitnamilegacy
-#     repoint as postgresql above.
+# Set `host` (and `passwordSecret.name` when auth is required). Set
+# `cluster: true` for Redis Cluster mode (AWS ElastiCache Cluster, self-hosted
+# Redis Cluster): the chart emits REDIS_CLUSTER_NODES from `host` / `port` as
+# the single seed and the client discovers the rest from CLUSTER SLOTS. The
+# chart ships no Redis of its own.
 #
 # For full control, define `general_settings.coordination_redis` in
 # `proxy_config` (host/port/password/username/url/ssl/startup_nodes/
 # sentinel_nodes/sentinel_password/service_name, each accepting os.environ/VAR
 # refs). An explicit block overrides these env vars.
 redis:
-  enabled: false
   cluster: false
   host: ""
   port: 6379
   passwordSecret:
     name: "" # Leave empty for auth-less Redis
     passwordKey: password
-  architecture: standalone
-  image:
-    repository: bitnamilegacy/redis
-    tag: 7.2.4-debian-12-r9
-  sentinel:
-    enabled: false
-    image:
-      repository: bitnamilegacy/redis-sentinel
-      tag: 7.2.4-debian-12-r7
-  metrics:
-    image:
-      repository: bitnamilegacy/redis-exporter
-      tag: 1.58.0-debian-12-r4
-  volumePermissions:
-    image:
-      repository: bitnamilegacy/os-shell
-      tag: 12-debian-12-r16
-  sysctl:
-    image:
-      repository: bitnamilegacy/os-shell
-      tag: 12-debian-12-r16
-  kubectl:
-    image:
-      repository: bitnamilegacy/kubectl
-      tag: 1.29.2-debian-12-r3
 
 # Arbitrary extra Kubernetes manifests rendered verbatim with the release,
 # e.g. a NetworkPolicy or an ExternalSecret the proxy needs.

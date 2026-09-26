@@ -16,7 +16,7 @@ metadata:
   labels:
     {{- include "litellm.commonLabels" . | nindent 4 }}
     app.kubernetes.io/component: migrations
-  {{- $helmHook := and .Values.migrationJob.hooks.helm.enabled (not .Values.postgresql.enabled) }}
+  {{- $helmHook := .Values.migrationJob.hooks.helm.enabled }}
   {{- if or $helmHook .Values.migrationJob.hooks.argocd.enabled }}
   annotations:
     {{- if $helmHook }}
