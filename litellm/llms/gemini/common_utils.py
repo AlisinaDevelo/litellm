@@ -584,7 +584,7 @@ class GoogleAIStudioTokenCounter(BaseTokenCounter):
             )
             if contents is None
             else GeminiCountTokensPayload(
-                contents=cast("tuple[ContentType, ...]", tuple(contents)),  # cast-ok: native contents pass through
+                contents=cast(tuple[ContentType, ...], tuple(contents)),  # cast-ok: native contents pass through
                 system_instruction=None,
                 tools=None,
             )
