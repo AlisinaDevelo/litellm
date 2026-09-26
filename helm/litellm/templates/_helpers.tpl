@@ -686,7 +686,7 @@ Service spec fields shared by the component and monolith Services.
 Invoke with the component's `service` dict.
 */}}
 {{- define "litellm.service.extras" -}}
-{{- if and (eq .type "LoadBalancer") .loadBalancerClass }}
+{{- if and (eq .type "LoadBalancer") .loadBalancerClass -}}
 loadBalancerClass: {{ .loadBalancerClass | quote }}
 {{- end }}
 {{- end -}}

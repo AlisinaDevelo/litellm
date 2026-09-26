@@ -16,6 +16,6 @@
 .idea/
 *.tmproj
 .vscode/
-tests/
-ci/
+/tests/
+/ci/
 README.md

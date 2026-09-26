@@ -12,7 +12,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.ui.service.type }}
-  {{- include "litellm.service.extras" .Values.ui.service | nindent 2 }}
+  {{- with include "litellm.service.extras" .Values.ui.service }}
+  {{- . | nindent 2 }}
+  {{- end }}
   ports:
     - port: {{ .Values.ui.service.port }}
       targetPort: http

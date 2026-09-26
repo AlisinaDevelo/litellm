@@ -348,7 +348,8 @@ test-integration: install-test-deps
 	$(UV_RUN) pytest tests/ -k "not test_litellm"
 
 test-unit-helm: install-helm-unittest
-	helm unittest -f 'tests/*.yaml' helm/litellm-helm
+	helm dependency build helm/litellm
+	helm unittest -f 'tests/*.yaml' helm/litellm
 
 # LLM Translation testing targets
 test-llm-translation: install-test-deps

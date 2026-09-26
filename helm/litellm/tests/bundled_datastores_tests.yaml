@@ -1,0 +1,324 @@
+suite: test the optional bundled PostgreSQL and Redis subcharts
+templates:
+  - monolith/deployment.yaml
+  - gateway/deployment.yaml
+  - migrations-job.yaml
+  - secret-dbcredentials.yaml
+  - gateway/configmap.yaml
+  - charts/postgresql/templates/primary/statefulset.yaml
+  - charts/redis/templates/master/application.yaml
+  - charts/redis/templates/configmap.yaml
+  - charts/redis/templates/health-configmap.yaml
+  - charts/redis/templates/scripts-configmap.yaml
+  - charts/redis/templates/secret.yaml
+tests:
+  - it: renders no credentials Secret by default
+    template: secret-dbcredentials.yaml
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: bundled postgresql wires the writer to the subchart Service and the generated credentials Secret
+    set:
+      monolith.enabled: true
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+    templates:
+      - monolith/deployment.yaml
+      - migrations-job.yaml
+      - secret-dbcredentials.yaml
+    asserts:
+      - isKind:
+          of: Secret
+        template: secret-dbcredentials.yaml
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-litellm-dbcredentials
+        template: secret-dbcredentials.yaml
+      - equal:
+          path: data.username
+          value: bGl0ZWxsbQ==
+        template: secret-dbcredentials.yaml
+      - equal:
+          path: data.password
+          value: c3VwZXItc2VjcmV0
+        template: secret-dbcredentials.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_HOST
+            value: RELEASE-NAME-postgresql
+        template: monolith/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_PORT
+            value: "5432"
+        template: monolith/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_NAME
+            value: litellm
+        template: monolith/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_USER
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-litellm-dbcredentials
+                key: username
+        template: monolith/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-litellm-dbcredentials
+                key: password
+        template: monolith/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_HOST
+            value: RELEASE-NAME-postgresql
+        template: migrations-job.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-litellm-dbcredentials
+                key: password
+        template: migrations-job.yaml
+
+  - it: bundled postgresql also feeds the componentized gateway
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      postgresql.auth.database: proxydb
+    template: gateway/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_HOST
+            value: RELEASE-NAME-postgresql
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATABASE_NAME
+            value: proxydb
+
+  - it: bundled postgresql runs the migrations Job as a regular resource rather than a pre-install hook
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+    template: migrations-job.yaml
+    asserts:
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]
+
+  - it: bundled postgresql refuses an external writer host at the same time
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      database.writer.host: postgres.example.com
+    template: gateway/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: postgresql.enabled and database.writer.host are mutually exclusive
+
+  - it: bundled postgresql requires an explicit password
+    set:
+      postgresql.enabled: true
+    template: secret-dbcredentials.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: postgresql.auth.password is required when postgresql.enabled is true
+
+  - it: pulls the bundled postgres from a repository that still publishes the pinned tag
+    template: charts/postgresql/templates/primary/statefulset.yaml
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/bitnamilegacy/postgresql:16.2.0-debian-12-r6
+
+  - it: pulls the bundled postgres metrics exporter from the same repository
+    template: charts/postgresql/templates/primary/statefulset.yaml
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      postgresql.metrics.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: docker.io/bitnamilegacy/postgres-exporter:0.15.0-debian-12-r14
+
+  - it: runs the bundled postgres init container from the same repository
+    template: charts/postgresql/templates/primary/statefulset.yaml
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      postgresql.volumePermissions.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: docker.io/bitnamilegacy/os-shell:12-debian-12-r16
+
+  - it: rejects a floating postgres tag that could cross a major version on an existing volume
+    template: secret-dbcredentials.yaml
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      postgresql.image.tag: latest
+    asserts:
+      - failedTemplate:
+          errorMessage: 'postgresql.image.tag must be pinned to an explicit version when postgresql.enabled is true (got "latest"). An unpinned tag can start a different PostgreSQL major against the existing data directory, which makes the database unreadable and is not recoverable in place. Crossing a major version requires a dump and restore.'
+
+  - it: rejects an empty postgres tag
+    template: secret-dbcredentials.yaml
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      postgresql.image.tag: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: 'postgresql.image.tag must be pinned to an explicit version when postgresql.enabled is true \(got ""\)'
+
+  - it: accepts an empty postgres tag when the image is pinned by digest
+    template: secret-dbcredentials.yaml
+    set:
+      postgresql.enabled: true
+      postgresql.auth.password: super-secret
+      postgresql.image.tag: ""
+      postgresql.image.digest: sha256:0d0e2f1a5b3c4d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: does not constrain the postgres tag when the bundled database is not deployed
+    template: secret-dbcredentials.yaml
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      postgresql.enabled: false
+      postgresql.image.tag: latest
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: bundled redis wires REDIS_* at the master Service and the subchart auth Secret
+    set:
+      monolith.enabled: true
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      redis.enabled: true
+    template: monolith/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_HOST
+            value: RELEASE-NAME-redis-master
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_PORT
+            value: "6379"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-redis
+                key: redis-password
+
+  - it: bundled redis points at the sentinel Service and port in replication mode
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      redis.enabled: true
+      redis.architecture: replication
+      redis.sentinel.enabled: true
+    template: gateway/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_HOST
+            value: RELEASE-NAME-redis
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_PORT
+            value: "26379"
+
+  - it: bundled redis honours an operator supplied auth.existingSecret
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      redis.enabled: true
+      redis.auth.existingSecret: my-redis-auth
+      redis.auth.existingSecretPasswordKey: pw
+    template: gateway/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: my-redis-auth
+                key: pw
+
+  - it: bundled redis without auth leaves REDIS_PASSWORD out
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      redis.enabled: true
+      redis.auth.enabled: false
+    template: gateway/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_HOST
+            value: RELEASE-NAME-redis-master
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_PASSWORD
+          any: true
+
+  - it: bundled redis refuses an external redis.host at the same time
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      redis.enabled: true
+      redis.host: redis.example.com
+    template: gateway/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: redis.enabled and redis.host are mutually exclusive
+
+  - it: pulls the bundled redis from a repository that still publishes the pinned tag
+    template: charts/redis/templates/master/application.yaml
+    set:
+      database.writer.host: postgres.example.com
+      database.writer.dbname: litellm
+      redis.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/bitnamilegacy/redis:7.2.4-debian-12-r9

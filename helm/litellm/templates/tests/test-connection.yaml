@@ -8,9 +8,13 @@ metadata:
     app.kubernetes.io/component: test
   annotations:
     helm.sh/hook: test
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-delete-policy: before-hook-creation
 spec:
   restartPolicy: Never
+  {{- with .Values.gateway.podSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- with .Values.imagePullSecrets }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
@@ -19,6 +23,10 @@ spec:
     - name: health
       image: {{ include "litellm.image" . | quote }}
       imagePullPolicy: {{ .Values.image.pullPolicy }}
+      {{- with .Values.gateway.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       args:
         - proxy
         - --health

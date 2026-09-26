@@ -294,7 +294,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.gateway.service.type }}
-  {{- include "litellm.service.extras" .Values.gateway.service | nindent 2 }}
+  {{- with include "litellm.service.extras" .Values.gateway.service }}
+  {{- . | nindent 2 }}
+  {{- end }}
   ports:
     - port: {{ .Values.gateway.service.port }}
       targetPort: http
