@@ -198,7 +198,7 @@ def test_negotiation_evidence_reads_the_actual_reply(streamed: bool) -> None:
             },
         }
     ).encode()
-    response: Final = b"event: message\ndata: " + result + b"\n\n" if streamed else result
+    response: Final = b"data:\n\n: heartbeat\n\nevent: message\ndata: " + result + b"\n\n" if streamed else result
     assert read_negotiation(request, response, "text/event-stream" if streamed else "application/json") == (
         "2025-03-26",
         "2025-11-25",

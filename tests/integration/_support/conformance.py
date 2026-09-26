@@ -297,7 +297,7 @@ def read_negotiation(request: bytes, response: bytes, content_type: str) -> tupl
     body: Final = json.loads(request)
     received: Final = httpx.Response(200, content=response, headers={"content-type": content_type})
     messages: Final = (
-        tuple(event.json() for event in EventSource(received).iter_sse())
+        tuple(event.json() for event in EventSource(received).iter_sse() if event.data)
         if content_type.startswith("text/event-stream")
         else (received.json(),)
     )
