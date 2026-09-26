@@ -1,9 +1,223 @@
 {{/*
-Common naming + label helpers shared by gateway, backend, and ui templates.
+Common naming + label helpers shared by gateway, backend, ui, and monolith templates.
 */}}
 
 {{- define "litellm.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+The one image reference every container in the chart uses. `repository:tag`,
+or `repository:tag@digest` when image.digest is set; the tag falls back to
+the chart appVersion.
+*/}}
+{{- define "litellm.image" -}}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository $tag -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Componentized mode renders the gateway / backend / ui Deployments only when
+monolith mode is off.
+*/}}
+{{- define "litellm.gateway.render" -}}
+{{- if and .Values.gateway.enabled (not .Values.monolith.enabled) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "litellm.backend.render" -}}
+{{- if and .Values.backend.enabled (not .Values.monolith.enabled) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "litellm.ui.render" -}}
+{{- if and .Values.ui.enabled (not .Values.monolith.enabled) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The proxy Deployment (monolith mode) and the gateway Deployment
+(componentized mode) are the same pod spec fed by .Values.gateway, so the
+templates that serve both (HPA, KEDA, PDB, metrics Service, ServiceMonitor)
+resolve their name, component label and selector through these.
+*/}}
+{{- define "litellm.proxy.fullname" -}}
+{{- include "litellm.fullname" . -}}
+{{- end -}}
+
+{{- define "litellm.proxy.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "litellm.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: proxy
+{{- end -}}
+
+{{- define "litellm.workload.componentName" -}}
+{{- if .Values.monolith.enabled -}}proxy{{- else -}}gateway{{- end -}}
+{{- end -}}
+
+{{- define "litellm.workload.fullname" -}}
+{{- if .Values.monolith.enabled -}}
+{{- include "litellm.proxy.fullname" . -}}
+{{- else -}}
+{{- include "litellm.gateway.fullname" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "litellm.workload.selectorLabels" -}}
+{{- if .Values.monolith.enabled -}}
+{{- include "litellm.proxy.selectorLabels" . -}}
+{{- else -}}
+{{- include "litellm.gateway.selectorLabels" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "litellm.workload.render" -}}
+{{- if or .Values.monolith.enabled .Values.gateway.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Container arguments for the proxy (monolith) container. The image entrypoint
+dispatches on the first argument.
+*/}}
+{{- define "litellm.proxy.args" -}}
+- proxy
+- --port
+- "4000"
+{{- if .Values.gateway.config.create }}
+- --config
+- /app/config/config.yaml
+{{- end }}
+{{- with .Values.monolith.extraArgs }}
+{{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Master key Secret reference. `masterKey.secretName` when set, otherwise the
+Secret the chart generates when `masterKey.generate` is true.
+*/}}
+{{- define "litellm.masterKey.generatedSecretName" -}}
+{{- printf "%s-masterkey" (include "litellm.fullname" .) -}}
+{{- end -}}
+
+{{- define "litellm.masterKey.secretName" -}}
+{{- if .Values.masterKey.secretName -}}
+{{- .Values.masterKey.secretName -}}
+{{- else if .Values.masterKey.generate -}}
+{{- include "litellm.masterKey.generatedSecretName" . -}}
+{{- else -}}
+{{- fail "masterKey.secretName is required (the chart never accepts an inline master key); set it to an existing Secret or set masterKey.generate: true" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Bundled PostgreSQL wiring. The subchart Service is `<release>-postgresql`
+and the chart creates `<fullname>-dbcredentials` from postgresql.auth so
+the application pods read username + password from one Secret.
+*/}}
+{{- define "litellm.postgresql.credentialsSecretName" -}}
+{{- printf "%s-dbcredentials" (include "litellm.fullname" .) -}}
+{{- end -}}
+
+{{- define "litellm.postgresql.serviceName" -}}
+{{- printf "%s-%s" .Release.Name (default "postgresql" .Values.postgresql.nameOverride | trunc 63 | trimSuffix "-") -}}
+{{- end -}}
+
+{{/*
+Reject an unpinned image tag for the bundled PostgreSQL. A floating tag lets
+a chart upgrade start a newer PostgreSQL major against the existing
+PersistentVolumeClaim, which the server refuses to open and which cannot be
+undone in place.
+*/}}
+{{- define "litellm.validateBundledPostgresImageTag" -}}
+{{- $tag := .Values.postgresql.image.tag | default "" | toString -}}
+{{- $digest := .Values.postgresql.image.digest | default "" | toString -}}
+{{- if and (eq $digest "") (or (eq $tag "") (eq $tag "latest")) -}}
+{{- fail (printf "postgresql.image.tag must be pinned to an explicit version when postgresql.enabled is true (got %q). An unpinned tag can start a different PostgreSQL major against the existing data directory, which makes the database unreadable and is not recoverable in place. Crossing a major version requires a dump and restore." $tag) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Writer connection pieces: the bundled PostgreSQL when postgresql.enabled,
+otherwise database.writer. Returns a dict with host, port, dbname and the
+passwordSecret triple so `litellm.serverEnv` renders both the same way.
+*/}}
+{{- define "litellm.database.writer" -}}
+{{- if .Values.postgresql.enabled -}}
+{{- if .Values.database.writer.host -}}
+{{- fail "postgresql.enabled and database.writer.host are mutually exclusive: the bundled PostgreSQL provides the writer, so leave database.writer.host empty or disable the subchart" -}}
+{{- end -}}
+{{- $writer := deepCopy .Values.database.writer -}}
+{{- $_ := set $writer "host" (include "litellm.postgresql.serviceName" .) -}}
+{{- $_ := set $writer "port" (dig "primary" "service" "ports" "postgresql" 5432 .Values.postgresql) -}}
+{{- $_ := set $writer "dbname" (.Values.postgresql.auth.database | default "litellm") -}}
+{{- $_ := set $writer "passwordSecret" (dict "name" (include "litellm.postgresql.credentialsSecretName" .) "usernameKey" "username" "passwordKey" "password") -}}
+{{- toYaml $writer -}}
+{{- else -}}
+{{- toYaml .Values.database.writer -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Bundled Redis wiring. The subchart only serves sentinel in "replication"
+architecture, and in that mode the sentinel Service is `<release>-redis`
+rather than `<release>-redis-master`.
+*/}}
+{{- define "litellm.redis.serviceName" -}}
+{{- $name := default "redis" .Values.redis.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- if .Values.redis.sentinel.enabled -}}
+{{- printf "%s-%s" .Release.Name $name -}}
+{{- else -}}
+{{- printf "%s-%s-master" .Release.Name $name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "litellm.redis.bundledPort" -}}
+{{- if .Values.redis.sentinel.enabled -}}
+{{- dig "sentinel" "service" "ports" "sentinel" 26379 .Values.redis -}}
+{{- else -}}
+{{- dig "master" "service" "ports" "redis" 6379 .Values.redis -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The subchart's auth Secret: `auth.existingSecret` when the operator supplies
+one, otherwise the `<release>-redis` Secret the subchart creates, keyed by
+`redis-password`.
+*/}}
+{{- define "litellm.redis.bundledSecretName" -}}
+{{- $existing := dig "auth" "existingSecret" "" .Values.redis -}}
+{{- if $existing -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name (default "redis" .Values.redis.nameOverride | trunc 63 | trimSuffix "-") -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "litellm.redis.bundledSecretKey" -}}
+{{- dig "auth" "existingSecretPasswordKey" "" .Values.redis | default "redis-password" -}}
+{{- end -}}
+
+{{/*
+Coordination Redis pieces: the bundled Redis when redis.enabled, otherwise
+the external redis.host block. Returns a dict with host, port, cluster and
+the passwordSecret pair; empty host means no Redis.
+*/}}
+{{- define "litellm.redis.connection" -}}
+{{- if .Values.redis.enabled -}}
+{{- if .Values.redis.host -}}
+{{- fail "redis.enabled and redis.host are mutually exclusive: the bundled Redis provides the coordination store, so leave redis.host empty or disable the subchart" -}}
+{{- end -}}
+{{- $auth := dig "auth" "enabled" true .Values.redis -}}
+{{- $secret := dict "name" "" "passwordKey" "" -}}
+{{- if $auth -}}
+{{- $secret = dict "name" (include "litellm.redis.bundledSecretName" .) "passwordKey" (include "litellm.redis.bundledSecretKey" .) -}}
+{{- end -}}
+{{- toYaml (dict "host" (include "litellm.redis.serviceName" .) "port" (include "litellm.redis.bundledPort" .) "cluster" false "passwordSecret" $secret) -}}
+{{- else -}}
+{{- toYaml (dict "host" .Values.redis.host "port" .Values.redis.port "cluster" .Values.redis.cluster "passwordSecret" .Values.redis.passwordSecret) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "litellm.fullname" -}}
@@ -113,6 +327,7 @@ Each component (gateway, backend, ui) has its own SA config under
 .Values.serviceAccounts.<component>. When `create` is true and `name` is
 empty the chart defaults to "<release>-litellm-<component>". When `create`
 is false the chart uses the provided name, or the namespace `default` SA.
+The monolith pod runs as the gateway ServiceAccount.
 */}}
 {{- define "litellm.gateway.serviceAccountName" -}}
 {{- if .Values.serviceAccounts.gateway.create -}}
@@ -235,15 +450,15 @@ IAM_TOKEN_DB_AUTH / AZURE_POSTGRESQL_AUTH toggle that only the writer sets.
 - name: LITELLM_MASTER_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ required "masterKey.secretName is required (the chart no longer accepts an inline master key)" $root.Values.masterKey.secretName }}
+      name: {{ include "litellm.masterKey.secretName" $root }}
       key: {{ $root.Values.masterKey.secretKey | default "master-key" }}
 {{- if $component.logLevel }}
 - name: LITELLM_LOG
   value: {{ $component.logLevel | quote }}
 {{- end }}
-{{- with $root.Values.database.writer }}
+{{- with (fromYaml (include "litellm.database.writer" $root)) }}
 - name: DATABASE_HOST
-  value: {{ required "database.writer.host is required" .host | quote }}
+  value: {{ required "database.writer.host is required (or set postgresql.enabled: true for the bundled database)" .host | quote }}
 - name: DATABASE_PORT
   value: {{ .port | default 5432 | quote }}
 - name: DATABASE_USER
@@ -341,26 +556,28 @@ harmless no-op for the Job and authoritative for the app pods.
      tracking, pod lock manager) via its REDIS_* env fallback. An explicit
      `general_settings.coordination_redis` block in proxy_config takes
      precedence over anything emitted here. */}}
-{{- if $root.Values.redis.host }}
+{{- with (fromYaml (include "litellm.redis.connection" $root)) }}
+{{- if .host }}
 - name: REDIS_HOST
-  value: {{ $root.Values.redis.host | quote }}
+  value: {{ .host | quote }}
 - name: REDIS_PORT
-  value: {{ $root.Values.redis.port | quote }}
-{{- if $root.Values.redis.passwordSecret.name }}
+  value: {{ .port | quote }}
+{{- if .passwordSecret.name }}
 - name: REDIS_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ $root.Values.redis.passwordSecret.name }}
-      key: {{ $root.Values.redis.passwordSecret.passwordKey | default "password" }}
+      name: {{ .passwordSecret.name }}
+      key: {{ .passwordSecret.passwordKey | default "password" }}
 {{- end }}
-{{- if $root.Values.redis.cluster }}
+{{- if .cluster }}
 {{/* The proxy falls back to REDIS_CLUSTER_NODES (JSON) to build a cluster-mode
      coordination client when `general_settings.coordination_redis` is absent
      and no plain-Redis response cache is configured. We seed with the single
      configured endpoint; the cluster client discovers the remaining nodes from
      CLUSTER SLOTS at startup. */}}
 - name: REDIS_CLUSTER_NODES
-  value: {{ printf "[{\"host\":%q,\"port\":%v}]" $root.Values.redis.host (int $root.Values.redis.port) | quote }}
+  value: {{ printf "[{\"host\":%q,\"port\":%v}]" .host (int .port) | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- with $component.extraEnv }}
@@ -369,7 +586,7 @@ harmless no-op for the Job and authoritative for the app pods.
 {{- end -}}
 
 {{/*
-In-container PgBouncer env for the gateway container. Under IAM or Entra auth the pooler mints and renews the database token itself.
+In-container PgBouncer env for the gateway and proxy containers. Under IAM or Entra auth the pooler mints and renews the database token itself.
 */}}
 {{- define "litellm.connectionPoolEnv" -}}
 {{- with .Values.database.connectionPool -}}
@@ -406,7 +623,7 @@ than silently replaced by the fallback.
 {{- $max := $component.pdb.maxUnavailable -}}
 {{- $minSet := not (or (kindIs "invalid" $min) (eq (printf "%v" $min) "")) -}}
 {{- $maxSet := not (or (kindIs "invalid" $max) (eq (printf "%v" $max) "")) -}}
-{{- if and $component.enabled $component.pdb $component.pdb.enabled }}
+{{- if and .enabled $component.pdb $component.pdb.enabled }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -462,6 +679,16 @@ ImplementationSpecific
 {{- else -}}
 {{- .pathType -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Service spec fields shared by the component and monolith Services.
+Invoke with the component's `service` dict.
+*/}}
+{{- define "litellm.service.extras" -}}
+{{- if and (eq .type "LoadBalancer") .loadBalancerClass }}
+loadBalancerClass: {{ .loadBalancerClass | quote }}
+{{- end }}
 {{- end -}}
 
 {{- define "litellm.gateway.prometheusMultiprocDir" -}}/tmp/litellm_prometheus_multiproc{{- end -}}

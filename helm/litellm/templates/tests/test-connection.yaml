@@ -1,0 +1,29 @@
+{{- if include "litellm.workload.render" . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "litellm.fullname" . }}-test-connection
+  labels:
+    {{- include "litellm.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: health
+      image: {{ include "litellm.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      args:
+        - proxy
+        - --health
+        - --host
+        - {{ include "litellm.workload.fullname" . }}
+        - --port
+        - {{ .Values.gateway.service.port | quote }}
+{{- end }}
