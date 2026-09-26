@@ -1,18 +1,30 @@
 schemaVersion: 2.0.0
 
 metadataTest:
-  entrypoint: ["docker/prod_entrypoint.sh"]
-  user: "65534"
+  entrypoint: ["/app/docker/prod_entrypoint.sh"]
+  user: "65532:65532"
   workdir: "/app"
+  exposedPorts: ["4000", "4001", "3000"]
 
 fileExistenceTests:
-  - name: "Prisma Folder"
-    path: "/usr/local/lib/python3.13/site-packages/prisma/"
+  - name: "Prisma CLI bake"
+    path: "/opt/prisma/binaries/node_modules/.bin/prisma"
     shouldExist: true
-    uid: 65534
-    gid: 65534
-  - name: "Prisma Schema"
-    path: "/usr/local/lib/python3.13/site-packages/prisma/schema.prisma"
+  - name: "Prisma schema"
+    path: "/app/schema.prisma"
     shouldExist: true
-    uid: 65534
-    gid: 65534
+  - name: "Admin UI export"
+    path: "/var/lib/litellm/ui/index.html"
+    shouldExist: true
+    uid: 65532
+    gid: 0
+  - name: "UI cache is writable by the runtime group"
+    path: "/var/lib/litellm/ui"
+    shouldExist: true
+    permissions: "drwxrwxr-x"
+  - name: "nginx config for the ui component"
+    path: "/etc/nginx/nginx.conf"
+    shouldExist: true
+  - name: "pgbouncer"
+    path: "/usr/local/bin/pgbouncer"
+    shouldExist: true

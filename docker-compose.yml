@@ -12,6 +12,11 @@ services:
     # command:
     #  - "--config=/app/config.yaml"
     ##############################################
+    ## The same image runs every component. The first word of `command`
+    ## picks it: proxy (default), gateway, backend, ui, migrations,
+    ## metrics, collector. See docker/README.md
+    # command: ["gateway", "--port", "4000"]
+    ##############################################
     ports:
       - "4000:4000" # Map the container port to the host, change the host port if necessary
     environment:

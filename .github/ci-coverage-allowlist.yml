@@ -101,13 +101,4 @@ test_paths:
       - tests/integration/test_oci_integration.py
       - tests/integration/test_oci_proxy_integration.py
 
-dockerfiles:
-  - reason: >-
-      The dashboard container is a static Next.js export served by nginx, and the dashboard build
-      and lint workflows already exercise that output, so building the image adds no signal about it
-    paths:
-      - ui/Dockerfile
-  - reason: >-
-      An example image under cookbook/ that is documentation rather than a shipped artifact
-    paths:
-      - cookbook/litellm-ollama-docker-image/Dockerfile
+dockerfiles: []
