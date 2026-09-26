@@ -96,10 +96,6 @@ export function useDiscountConfig({ accessToken }: UseDiscountConfigProps): UseD
       }
 
       const trimmedPattern = modelPattern.trim();
-      if (trimmedPattern.includes("/")) {
-        toast.fromError("Model pattern cannot contain /");
-        return false;
-      }
 
       const providerValue = getProviderBackendValue(selectedProvider);
 

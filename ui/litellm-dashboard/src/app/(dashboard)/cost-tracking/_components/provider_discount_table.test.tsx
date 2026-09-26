@@ -316,6 +316,18 @@ describe("ProviderDiscountTable", () => {
     expect(screen.getByText("All models")).toBeInTheDocument();
   });
 
+  it("should split a nested pattern key on the first slash only", () => {
+    renderWithProviders(
+      <ProviderDiscountTable
+        discountConfig={{ "openrouter/anthropic/claude-*": 0.15 }}
+        onDiscountChange={onDiscountChange}
+        onRemoveProvider={onRemoveProvider}
+      />,
+    );
+    expect(screen.getByText("anthropic/claude-*")).toBeInTheDocument();
+    expect(screen.queryByText("All models")).not.toBeInTheDocument();
+  });
+
   it("should include the pattern in the row action labels for a pattern key", async () => {
     const user = userEvent.setup();
     renderWithProviders(

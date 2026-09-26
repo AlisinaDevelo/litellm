@@ -79,6 +79,22 @@ def test_resolve_cost_discount_none_model_only_bare_matches():
     assert resolve_cost_discount({"vertex_ai/claude-*": 0.2}, "vertex_ai", None) is None
 
 
+def test_resolve_cost_discount_char_class_counts_as_wildcard():
+    config = {"vertex_ai/claude-sonnet-*": 0.3, "vertex_ai/claude-[abcdefghijklmnopqrstuvwxyz]*": 0.1}
+    assert resolve_cost_discount(config, "vertex_ai", "claude-sonnet-4-5") == 0.3
+
+
+def test_resolve_cost_discount_unclosed_bracket_matches_literally():
+    config = {"vertex_ai/weird[": 0.2}
+    assert resolve_cost_discount(config, "vertex_ai", "weird[") == 0.2
+    assert resolve_cost_discount(config, "vertex_ai", "weirdx") is None
+
+
+def test_resolve_cost_discount_glob_crosses_slash_in_model():
+    config = {"bedrock/*anthropic.claude-*": 0.15, "bedrock": 0.05}
+    assert resolve_cost_discount(config, "bedrock", "bedrock/us-east-1/anthropic.claude-v2:1") == 0.15
+
+
 def test_resolve_cost_discount_exact_pattern_key_does_not_count_as_exact():
     config = {"vertex_ai/claude-*": 0.2, "vertex_ai": 0.05}
     assert resolve_cost_discount(config, "vertex_ai", "vertex_ai") == 0.05

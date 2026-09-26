@@ -14,6 +14,7 @@ vi.mock("./provider_display_helpers", () => ({
       OpenAI: "openai",
       Anthropic: "anthropic",
       Vertex_AI: "vertex_ai",
+      Openrouter: "openrouter",
     };
     return map[enumKey] ?? null;
   }),
@@ -24,6 +25,7 @@ vi.mock("@/components/provider_info_helpers", () => ({
     OpenAI: "OpenAI",
     Anthropic: "Anthropic",
     Vertex_AI: "Vertex AI",
+    Openrouter: "OpenRouter",
   },
 }));
 
@@ -222,16 +224,24 @@ describe("useDiscountConfig", () => {
       expect(JSON.parse(patchCall![1]!.body as string)).toEqual({ openai: 0.05 });
     });
 
-    it("should reject a pattern containing a slash", async () => {
+    it("should compose a nested pattern with slashes into the config key", async () => {
+      vi.spyOn(global, "fetch")
+        .mockResolvedValueOnce({ ok: true, json: async () => ({}) } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ values: { "openrouter/anthropic/claude-*": 0.15 } }),
+        } as Response);
+
       const { result } = renderHook(() => useDiscountConfig({ accessToken: "test-token" }));
 
       let success: boolean;
       await act(async () => {
-        success = await result.current.handleAddProvider("OpenAI", "5", "a/b");
+        success = await result.current.handleAddProvider("Openrouter", "15", "anthropic/claude-*");
       });
 
-      expect(success!).toBe(false);
-      expect(toast.fromError).toHaveBeenCalledWith("Model pattern cannot contain /");
+      expect(success!).toBe(true);
+      const patchCall = vi.mocked(global.fetch).mock.calls.find(([, init]) => init?.method === "PATCH");
+      expect(JSON.parse(patchCall![1]!.body as string)).toEqual({ "openrouter/anthropic/claude-*": 0.15 });
     });
 
     it("should let a provider with a bare discount also get a pattern entry", async () => {

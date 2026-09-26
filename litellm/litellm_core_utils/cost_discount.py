@@ -18,7 +18,24 @@ def parse_cost_discount_key(key: str) -> CostDiscountKey:
 
 
 def _literal_length(pattern: str) -> int:
-    return sum(1 for char in pattern if char not in _GLOB_CHARS)
+    length = 0
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char in "*?":
+            index += 1
+            continue
+        if char == "[":
+            search_start = index + 2 if pattern[index + 1 : index + 2] == "!" else index + 1
+            if pattern[search_start : search_start + 1] == "]":
+                search_start += 1
+            closing = pattern.find("]", search_start)
+            if closing >= 0:
+                index = closing + 1
+                continue
+        length += 1
+        index += 1
+    return length
 
 
 def resolve_cost_discount(
