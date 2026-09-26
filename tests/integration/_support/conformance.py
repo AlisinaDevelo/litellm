@@ -272,6 +272,15 @@ def required_conformance_nodes() -> tuple[str, ...]:
         official
         + matrix
         + ("tests/integration/mcp/test_mcp_protocol_errors.py::test_omitted_tool_arguments_reach_the_upstream",)
+        + tuple(
+            "tests/integration/mcp/test_mcp_official_conformance.py::" + name
+            for name in (
+                "test_conformance_bridge_preserves_headers_payload_and_error_status[200]",
+                "test_conformance_bridge_preserves_headers_payload_and_error_status[403]",
+                "test_official_runner_rejects_unknown_scenario",
+                "test_stalled_reference_is_killed_and_cannot_report_clean_teardown",
+            )
+        )
     )
 
 
