@@ -34,11 +34,15 @@ def read_checks(directory: Path, scenario: str) -> tuple[ConformanceCheck, ...]:
     assert len(reports) == 1, f"conformance {scenario}: expected one fresh report, found {len(reports)}"
     checks: Final = TypeAdapter(tuple[ConformanceCheck, ...]).validate_json(reports[0].read_bytes())
     assert len({check.id for check in checks}) == len(checks), f"conformance {scenario}: duplicate checks"
-    required: Final = (
-        ("localhost-host-rebinding-rejected", "localhost-host-valid-accepted")
-        if scenario == "dns-rebinding-protection"
-        else (scenario,)
-    )
+    required: Final = {
+        "dns-rebinding-protection": ("localhost-host-rebinding-rejected", "localhost-host-valid-accepted"),
+        "server-session-lifecycle": (
+            "server-session-initialized-accepted",
+            "server-session-delete-accepted",
+            "server-session-terminated-returns-404",
+        ),
+        "server-sse-multiple-streams": ("server-accepts-multiple-post-streams", "server-sse-streams-functional"),
+    }.get(scenario, (scenario,))
     for identity in required:
         assert tuple(check.status for check in checks if check.id == identity) == ("SUCCESS",), (
             f"conformance {scenario}: required check {identity} did not pass: {checks}"
@@ -228,6 +232,8 @@ def translation_cases() -> tuple[tuple[str, str, str, str], ...]:
 # The simple-text runner/reference mismatch has an explicit SDK gap case instead.
 OFFICIAL_SCENARIOS: Final = (
     "server-initialize",
+    "server-session-lifecycle",
+    "server-sse-multiple-streams",
     "ping",
     "dns-rebinding-protection",
     "tools-list",

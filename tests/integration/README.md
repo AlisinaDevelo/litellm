@@ -64,6 +64,8 @@ Coverage is deliberately explicit:
 - The official simple-text scenario accepts error text, and its reference rejects its omitted
   arguments. Exact text with `{}` and omitted-argument forwarding therefore have explicit SDK
   cases. This limitation cannot be treated as a successful official simple-text result.
+- The schema scenario looks up an unprefixed fixture name. A direct/gateway SDK comparison
+  instead requires the full JSON Schema 2020-12 input schema to survive unchanged.
 - Logging, completion, resource subscriptions, sampling and elicitation are not advertised by
   this gateway contract; their capability-specific scenarios do not establish legacy support.
   Modern 2026-07-28 and extension scenarios belong to later activation gates.

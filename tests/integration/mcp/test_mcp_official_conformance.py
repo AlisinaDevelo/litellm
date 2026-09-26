@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import queue
@@ -17,6 +18,8 @@ from integration._support.conformance import (
 )
 from integration._support.mcp import McpPeer, official_client_outcomes, register_mcp
 from integration._support.wire import Reply, wire_server
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from pydantic import TypeAdapter
 
 
@@ -48,6 +51,20 @@ def test_official_scenario_through_gateway(
                 names: Final = TypeAdapter(tuple[str, ...]).validate_python(direct_checks[name].details[field])
                 assert names, "Official reference listed no fixtures"
                 assert gateway_checks[name].details[field] == [f"{alias}-{fixture}" for fixture in names]
+            if name == "tools-list":
+
+                async def schema(url: str, tool_name: str, token: str | None = None) -> dict[str, object]:
+                    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"} if token else {}) as http:
+                        async with streamable_http_client(url, http_client=http) as streams:
+                            async with ClientSession(streams[0], streams[1]) as session:
+                                await session.initialize()
+                                listed: Final = await session.list_tools()
+                                return next(tool.input_schema for tool in listed.tools if tool.name == tool_name)
+
+                original_schema: Final = asyncio.run(schema(reference.url, "json_schema_2020_12_tool"))
+                assert original_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+                assert original_schema["$defs"] and original_schema["additionalProperties"] is False
+                assert asyncio.run(schema(endpoint, f"{alias}-json_schema_2020_12_tool", key)) == original_schema
             if name == "tools-call-error":
                 assert gateway_checks[name].details["result"] == direct_checks[name].details["result"], (
                     "An unrelated error masked the fixture error"

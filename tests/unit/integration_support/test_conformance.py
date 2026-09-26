@@ -235,3 +235,31 @@ def test_security_control_cannot_pass_without_its_counterpart(tmp_path: Path, id
     (tmp_path / "checks.json").write_text(json.dumps([{"id": identity, "status": "SUCCESS"}]))
     with pytest.raises(AssertionError, match="required check"):
         read_checks(tmp_path, "dns-rebinding-protection")
+
+
+@pytest.mark.parametrize(
+    "scenario,identities",
+    (
+        (
+            "server-session-lifecycle",
+            (
+                "server-session-initialized-accepted",
+                "server-session-delete-accepted",
+                "server-session-terminated-returns-404",
+            ),
+        ),
+        ("server-sse-multiple-streams", ("server-accepts-multiple-post-streams", "server-sse-streams-functional")),
+    ),
+)
+def test_complete_transport_checks_pass_and_missing_checks_fail(
+    tmp_path: Path, scenario: str, identities: tuple[str, ...]
+) -> None:
+    report: Final = tmp_path / "checks.json"
+    report.write_text(json.dumps([{"id": identity, "status": "SUCCESS"} for identity in identities]))
+    assert len(read_checks(tmp_path, scenario)) == len(identities)
+    for missing in identities:
+        report.write_text(
+            json.dumps([{"id": identity, "status": "SUCCESS"} for identity in identities if identity != missing])
+        )
+        with pytest.raises(AssertionError, match="required check"):
+            read_checks(tmp_path, scenario)
