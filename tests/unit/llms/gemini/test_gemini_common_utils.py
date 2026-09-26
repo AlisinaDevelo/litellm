@@ -225,6 +225,35 @@ class TestGoogleAIStudioTokenCounter:
         assert json.loads(recorded[-1].content) == {"contents": contents}
 
     @pytest.mark.asyncio
+    async def test_count_tokens_strips_function_response_ids_from_native_contents(self):
+        import httpx
+
+        recorded: list = []
+
+        def _handler(request):
+            recorded.append(request)
+            return httpx.Response(200, json={"totalTokens": 5})
+
+        result = await GoogleAIStudioTokenCounter().count_tokens(
+            model_to_use="gemini-2.5-flash",
+            messages=None,
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [{"functionResponse": {"id": "call_1", "name": "Bash", "response": {"content": "ok"}}}],
+                }
+            ],
+            deployment={"litellm_params": {"api_key": "test-key"}},
+            request_model="gemini/gemini-2.5-flash",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)),
+        )
+
+        assert result is not None and result.error is not True, result
+        assert json.loads(recorded[-1].content)["contents"][0]["parts"] == [
+            {"functionResponse": {"name": "Bash", "response": {"content": "ok"}}}
+        ]
+
+    @pytest.mark.asyncio
     async def test_count_tokens_provider_error_returns_error_response(self):
         import httpx
 
