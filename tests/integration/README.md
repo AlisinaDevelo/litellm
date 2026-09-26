@@ -58,6 +58,9 @@ Coverage is deliberately explicit:
 
 - The official client negotiates 2025-11-25. Its `--spec-version` flag selects assertions;
   it does not pin its SDK handshake. Official cases cover each declared upstream revision.
+- Session termination is a separate mandatory gateway contract. Its raw HTTP control uses
+  the current pinned reference, which correctly returns 404 after deletion. The legacy
+  reference returns 400 for that case. Both references run unmodified with their own lockfiles.
 - The SDK matrix supplies the older-client gap: all 16 declared ordered revision pairs,
   HTTP and SSE ingress, and HTTP, SSE and stdio upstreams. It checks the seven operations in
   `capabilities.py` and records requested and returned revisions on both connections.

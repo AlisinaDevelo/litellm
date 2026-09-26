@@ -107,7 +107,7 @@ def reference_server(root: Path, directory: Path, port: int) -> Iterator["McpPee
     with (directory / "reference.log").open("w") as log:
         process: Final = subprocess.Popen(
             ["node", "--import", "tsx", "everything-server.ts"],
-            cwd=root / "legacy-reference/examples/servers/typescript",
+            cwd=root / "examples/servers/typescript",
             env={"PATH": os.environ["PATH"], "PORT": str(port)},
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -246,7 +246,6 @@ def translation_cases() -> tuple[tuple[str, str, str, str], ...]:
 # The simple-text runner/reference mismatch has an explicit SDK gap case instead.
 OFFICIAL_SCENARIOS: Final = (
     "server-initialize",
-    "server-session-lifecycle",
     "server-sse-multiple-streams",
     "ping",
     "tools-list",
@@ -303,6 +302,7 @@ def required_conformance_nodes() -> tuple[str, ...]:
                 "test_conformance_bridge_preserves_headers_payload_and_error_status[200]",
                 "test_conformance_bridge_preserves_headers_payload_and_error_status[403]",
                 "test_official_runner_rejects_unknown_scenario",
+                "test_official_gateway_session_lifecycle",
                 "test_stalled_reference_is_killed_and_cannot_report_clean_teardown",
                 "test_reference_children_are_stopped_after_the_root_exits",
             )

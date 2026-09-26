@@ -16,7 +16,7 @@ from integration._support.conformance import (
     require_negotiations,
     run_scenario,
 )
-from integration._support.mcp import McpPeer, official_client_outcomes, register_mcp
+from integration._support.mcp import McpPeer, mcp_peer, official_client_outcomes, register_mcp
 from integration._support.wire import Reply, wire_server
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -32,7 +32,7 @@ def test_official_scenario_through_gateway(
 ) -> None:
     root: Final = Path(os.environ["MCP_CONFORMANCE_ROOT"])
     output: Final = Path(os.environ.get("INTEGRATION_RESULTS_DIR", str(tmp_path))) / f"conformance-{uuid.uuid4().hex}"
-    with reference_server(root, output, unused_tcp_port) as reference, gateway.scenario() as scenario:
+    with reference_server(root / "legacy-reference", output, unused_tcp_port) as reference, gateway.scenario() as scenario:
         alias: Final = "official" + uuid.uuid4().hex[:8]
         upstream_wire: Final[queue.Queue[tuple[str, str]]] = queue.Queue()
         downstream_wire: Final[queue.Queue[tuple[str, str]]] = queue.Queue()
@@ -101,6 +101,20 @@ def test_official_scenario_through_gateway(
             require_negotiations(upstream, upstream_observed)
 
 
+def test_official_gateway_session_lifecycle(gateway: Gateway, tmp_path: Path, unused_tcp_port: int) -> None:
+    root: Final = Path(os.environ["MCP_CONFORMANCE_ROOT"])
+    output: Final = Path(os.environ.get("INTEGRATION_RESULTS_DIR", str(tmp_path))) / f"lifecycle-{uuid.uuid4().hex}"
+    with reference_server(root, output, unused_tcp_port) as reference:
+        run_scenario(root, reference.url, "server-session-lifecycle", output / "direct")
+    with mcp_peer() as upstream, gateway.scenario() as scenario:
+        alias: Final = "lifecycle" + uuid.uuid4().hex[:8]
+        identity: Final = register_mcp(scenario, upstream, alias)
+        key: Final = scenario.key(object_permission={"mcp_servers": [identity]})
+        endpoint: Final = str(gateway.client.base_url).rstrip("/") + f"/{alias}/mcp"
+        with authenticated_endpoint(endpoint, key, alias) as authenticated:
+            run_scenario(root, authenticated, "server-session-lifecycle", output / "gateway")
+
+
 @pytest.mark.parametrize("status", (200, 403))
 def test_conformance_bridge_preserves_headers_payload_and_error_status(status: int) -> None:
     body: Final = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "test_image_content"}}
@@ -154,7 +168,7 @@ def test_stalled_reference_is_killed_and_cannot_report_clean_teardown(tmp_path: 
 
     children: Final = frozenset(child.pid for child in psutil.Process().children())
     with ExitStack() as cleanup:
-        cleanup.enter_context(reference_server(Path(os.environ["MCP_CONFORMANCE_ROOT"]), tmp_path, unused_tcp_port))
+        cleanup.enter_context(reference_server(Path(os.environ["MCP_CONFORMANCE_ROOT"]) / "legacy-reference", tmp_path, unused_tcp_port))
         started: Final = tuple(child for child in psutil.Process().children() if child.pid not in children)
         assert len(started) == 1, started
         victim: Final = started[0]
@@ -167,7 +181,7 @@ def test_stalled_reference_is_killed_and_cannot_report_clean_teardown(tmp_path: 
 def test_reference_children_are_stopped_after_the_root_exits(tmp_path: Path, unused_tcp_port: int) -> None:
     import psutil
 
-    source: Final = tmp_path / "legacy-reference/examples/servers/typescript"
+    source: Final = tmp_path / "examples/servers/typescript"
     source.mkdir(parents=True)
     (source / "node_modules").symlink_to(
         Path(os.environ["MCP_CONFORMANCE_ROOT"]) / "legacy-reference/examples/servers/typescript/node_modules",
