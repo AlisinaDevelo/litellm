@@ -271,16 +271,14 @@ async def update_cost_discount_config(
         )
 
     # Validate that all providers are valid LiteLLM providers
-    invalid_providers: Final = []
-    for key in cost_discount_config:
-        parsed_key: Final = parse_cost_discount_key(key)
-        if parsed_key.model_pattern is not None and not parsed_key.model_pattern:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model pattern for {key} cannot be empty",
-            )
-        if parsed_key.provider not in LlmProvidersSet:
-            invalid_providers.append(parsed_key.provider)
+    parsed_keys: Final = tuple((key, parse_cost_discount_key(key)) for key in cost_discount_config)
+    empty_pattern_key: Final = next((key for key, parsed in parsed_keys if parsed.model_pattern == ""), None)
+    if empty_pattern_key is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model pattern for {empty_pattern_key} cannot be empty",
+        )
+    invalid_providers: Final = [parsed.provider for _, parsed in parsed_keys if parsed.provider not in LlmProvidersSet]
 
     if invalid_providers:
         raise HTTPException(
