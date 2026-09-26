@@ -4,7 +4,15 @@ from pathlib import Path
 from typing import Final
 
 import pytest
-from tests.integration._support.conformance import read_checks, verify_archive, prefixed_request
+from tests.integration._support.conformance import (
+    is_initialization,
+    read_negotiation,
+    prefixed_request,
+    read_checks,
+    require_negotiations,
+    require_passes,
+    verify_archive,
+)
 from pydantic import ValidationError
 
 
@@ -123,3 +131,107 @@ def test_only_fixture_name_is_translated_to_advertised_name(method: str) -> None
 )
 def test_name_integration_preserves_other_requests(body: bytes) -> None:
     assert prefixed_request(body, "official") == body
+
+
+@pytest.mark.parametrize("observed", ((), (("2025-11-25", "2025-11-25"),), (("2025-03-26", "2025-11-25"),)))
+def test_wrong_or_missing_negotiation_cannot_pass(observed: tuple[tuple[str, str], ...]) -> None:
+    with pytest.raises(AssertionError, match="negotiation"):
+        require_negotiations("2025-03-26", observed)
+
+
+def test_actual_requested_and_returned_revision_are_required() -> None:
+    assert require_negotiations("2025-03-26", (("2025-03-26", "2025-03-26"),)) is None
+
+
+@pytest.mark.parametrize(
+    "collected,passed,skipped,complete",
+    (
+        ([], [], [], True),
+        (["one"], ["one"], [], True),
+        (["one", "two"], ["one"], ["two"], True),
+        (["one", "two"], ["one", "two"], [], False),
+    ),
+)
+def test_missing_skipped_or_incomplete_gate_cannot_pass(
+    tmp_path: Path, collected: list[str], passed: list[str], skipped: list[str], complete: bool
+) -> None:
+    (tmp_path / "execution.json").write_text(
+        json.dumps({"collected": collected, "passed": passed, "skipped": skipped, "complete": complete})
+    )
+    with pytest.raises(AssertionError, match="conformance"):
+        require_passes(tmp_path, ("one", "two"))
+
+
+def test_complete_gate_requires_every_declared_case(tmp_path: Path) -> None:
+    (tmp_path / "execution.json").write_text(
+        json.dumps(
+            {
+                "collected": ["one", "two", "unrelated"],
+                "passed": ["one", "two"],
+                "skipped": ["unrelated"],
+                "complete": True,
+            }
+        )
+    )
+    assert require_passes(tmp_path, ("one", "two")) is None
+
+
+@pytest.mark.parametrize("streamed", (False, True))
+def test_negotiation_evidence_reads_the_actual_reply(streamed: bool) -> None:
+    request: Final = json.dumps(
+        {
+            "id": 1,
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+        }
+    ).encode()
+    result: Final = json.dumps(
+        {
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1"},
+            },
+        }
+    ).encode()
+    response: Final = b"event: message\ndata: " + result + b"\n\n" if streamed else result
+    assert read_negotiation(request, response, "text/event-stream" if streamed else "application/json") == (
+        "2025-03-26",
+        "2025-11-25",
+    )
+
+
+def test_unrelated_rpc_response_cannot_supply_negotiation() -> None:
+    with pytest.raises(AssertionError, match="initialize response"):
+        read_negotiation(b'{"id":1}', b'{"id":2,"result":{}}', "application/json")
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    ((b"", False), (b"[]", False), (b'{"method":"tools/list"}', False), (b'{"method":"initialize"}', True)),
+)
+def test_only_initialize_is_captured(body: bytes, expected: bool) -> None:
+    assert is_initialization(body) is expected
+
+
+def test_official_security_scenario_requires_both_rejection_and_allowed_control(tmp_path: Path) -> None:
+    (tmp_path / "checks.json").write_text(
+        json.dumps(
+            [
+                {"id": "localhost-host-rebinding-rejected", "status": "SUCCESS"},
+                {"id": "localhost-host-valid-accepted", "status": "SUCCESS"},
+            ]
+        )
+    )
+    assert len(read_checks(tmp_path, "dns-rebinding-protection")) == 2
+
+
+@pytest.mark.parametrize("identity", ("localhost-host-rebinding-rejected", "localhost-host-valid-accepted"))
+def test_security_control_cannot_pass_without_its_counterpart(tmp_path: Path, identity: str) -> None:
+    (tmp_path / "checks.json").write_text(json.dumps([{"id": identity, "status": "SUCCESS"}]))
+    with pytest.raises(AssertionError, match="required check"):
+        read_checks(tmp_path, "dns-rebinding-protection")

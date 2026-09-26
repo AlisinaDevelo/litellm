@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import uuid
 from pathlib import Path
 from typing import Final
@@ -7,28 +8,61 @@ from typing import Final
 import httpx
 import pytest
 from integration._support.client import Gateway
-from integration._support.conformance import authenticated_endpoint, reference_server, run_scenario
-from integration._support.mcp import official_client_outcomes, register_mcp
+from integration._support.conformance import (
+    authenticated_endpoint,
+    official_cases,
+    reference_server,
+    require_negotiations,
+    run_scenario,
+)
+from integration._support.mcp import McpPeer, official_client_outcomes, register_mcp
 from integration._support.wire import Reply, wire_server
+from pydantic import TypeAdapter
 
 
-@pytest.mark.parametrize("name", ("server-initialize", "tools-list", "tools-call-image"))
-def test_official_scenario_through_gateway(gateway: Gateway, tmp_path: Path, unused_tcp_port: int, name: str) -> None:
+@pytest.mark.parametrize(
+    ("name", "upstream"), tuple(pytest.param(*case, id="-".join(case)) for case in official_cases())
+)
+def test_official_scenario_through_gateway(
+    gateway: Gateway, tmp_path: Path, unused_tcp_port: int, name: str, upstream: str
+) -> None:
     root: Final = Path(os.environ["MCP_CONFORMANCE_ROOT"])
     output: Final = Path(os.environ.get("INTEGRATION_RESULTS_DIR", str(tmp_path))) / f"conformance-{uuid.uuid4().hex}"
     with reference_server(root, output, unused_tcp_port) as reference, gateway.scenario() as scenario:
         alias: Final = "official" + uuid.uuid4().hex[:8]
-        identity: Final = register_mcp(scenario, reference, alias, mcp_info={"protocol_version": "2025-11-25"})
-        key: Final = scenario.key(object_permission={"mcp_servers": [identity]})
-        direct: Final = run_scenario(root, reference.url, name, output / "direct")
-        endpoint: Final = str(gateway.client.base_url).rstrip("/") + f"/{alias}/mcp"
-        with authenticated_endpoint(endpoint, key, alias) as authenticated:
-            proxied: Final = run_scenario(root, authenticated, name, output / "gateway")
-        assert tuple(check.status for check in direct if check.id == name) == ("SUCCESS",)
-        assert tuple(check.status for check in proxied if check.id == name) == ("SUCCESS",)
-        listed, called = official_client_outcomes(gateway, key, f"/{alias}/mcp", "test_simple_text", {})
-        assert f"{alias}-test_simple_text" in listed.tools, listed
-        assert called.ok and called.text == "This is a simple text response for testing.", called
+        upstream_wire: Final[queue.Queue[tuple[str, str]]] = queue.Queue()
+        downstream_wire: Final[queue.Queue[tuple[str, str]]] = queue.Queue()
+        with authenticated_endpoint(reference.url, None, None, upstream_wire) as recorded_reference:
+            identity: Final = register_mcp(
+                scenario, McpPeer(recorded_reference, queue.Queue()), alias, mcp_info={"protocol_version": upstream}
+            )
+            key: Final = scenario.key(object_permission={"mcp_servers": [identity]})
+            direct: Final = run_scenario(root, reference.url, name, output / "direct")
+            endpoint: Final = str(gateway.client.base_url).rstrip("/") + f"/{alias}/mcp"
+            with authenticated_endpoint(endpoint, key, alias, downstream_wire) as authenticated:
+                proxied: Final = run_scenario(root, authenticated, name, output / "gateway")
+            direct_checks: Final = {check.id: check for check in direct}
+            gateway_checks: Final = {check.id: check for check in proxied}
+            if name in ("tools-list", "prompts-list"):
+                field: Final = "tools" if name == "tools-list" else "prompts"
+                names: Final = TypeAdapter(tuple[str, ...]).validate_python(direct_checks[name].details[field])
+                assert names, "Official reference listed no fixtures"
+                assert gateway_checks[name].details[field] == [f"{alias}-{fixture}" for fixture in names]
+            if name == "tools-call-error":
+                assert gateway_checks[name].details["result"] == direct_checks[name].details["result"], (
+                    "An unrelated error masked the fixture error"
+                )
+            listed, called = official_client_outcomes(gateway, key, f"/{alias}/mcp", "test_simple_text", {})
+            assert f"{alias}-test_simple_text" in listed.tools, listed
+            assert called.ok and called.text == "This is a simple text response for testing.", called
+            downstream_observed: Final = tuple(downstream_wire.get_nowait() for _ in range(downstream_wire.qsize()))
+            upstream_observed: Final = tuple(upstream_wire.get_nowait() for _ in range(upstream_wire.qsize()))
+            (output / "negotiation.json").write_text(
+                json.dumps({"client_gateway": downstream_observed, "gateway_reference": upstream_observed}, indent=2)
+                + "\n"
+            )
+            require_negotiations("2025-11-25", downstream_observed)
+            require_negotiations(upstream, upstream_observed)
 
 
 @pytest.mark.parametrize("status", (200, 403))
