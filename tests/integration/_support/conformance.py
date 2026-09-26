@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
 import httpx
+import psutil
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
@@ -42,6 +43,9 @@ def read_checks(directory: Path, scenario: str) -> tuple[ConformanceCheck, ...]:
             "server-session-terminated-returns-404",
         ),
         "server-sse-multiple-streams": ("server-accepts-multiple-post-streams", "server-sse-streams-functional"),
+        "server-initialize": ("server-initialize", "server-session-id-visible-ascii", "wire-schema-valid"),
+        "tools-list": ("tools-list", "tools-name-format", "wire-schema-valid"),
+        "tools-call-image": ("tools-call-image", "wire-schema-valid"),
     }.get(scenario, (scenario,))
     for identity in required:
         assert tuple(check.status for check in checks if check.id == identity) == ("SUCCESS",), (
@@ -93,7 +97,7 @@ def run_scenario(root: Path, url: str, scenario: str, directory: Path) -> tuple[
 def reference_server(root: Path, directory: Path, port: int) -> Iterator["McpPeer"]:
     from integration._support.client import eventually
     from integration._support.mcp import McpPeer
-    from integration._support.process import signal_group, stop_root_process
+    from integration._support.process import group_members, signal_group, stop_root_process
 
     directory.mkdir(parents=True, exist_ok=True)
     url: Final = f"http://127.0.0.1:{port}"
@@ -120,10 +124,17 @@ def reference_server(root: Path, directory: Path, port: int) -> Iterator["McpPee
             yield McpPeer(url + "/mcp", queue.Queue())
         finally:
             stopped: Final = stop_root_process(process)
-            if not stopped:
+            residual: Final = group_members(process.pid)
+            if residual:
+                signal_group(process.pid, signal.SIGTERM)
+                psutil.wait_procs(residual, timeout=5)
+            remaining: Final = group_members(process.pid)
+            if remaining:
                 signal_group(process.pid, signal.SIGKILL)
-                process.wait(timeout=3)
-            assert stopped, "Official reference required forced cleanup"
+                psutil.wait_procs(remaining, timeout=3)
+            process.wait(timeout=3)
+            assert not group_members(process.pid), "Official reference child survived cleanup"
+            assert stopped and not remaining, "Official reference required forced cleanup"
 
 
 @contextmanager
@@ -285,6 +296,7 @@ def required_conformance_nodes() -> tuple[str, ...]:
                 "test_conformance_bridge_preserves_headers_payload_and_error_status[403]",
                 "test_official_runner_rejects_unknown_scenario",
                 "test_stalled_reference_is_killed_and_cannot_report_clean_teardown",
+                "test_reference_children_are_stopped_after_the_root_exits",
             )
         )
     )
