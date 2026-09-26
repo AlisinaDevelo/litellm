@@ -6,13 +6,13 @@ import json
 import re
 import struct
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import Final, Literal, TypedDict, cast
+from typing import Final, Literal, cast
 
 import anyio
 import anyio.lowlevel
 import httpx
 import tiktoken
-from typing_extensions import ParamSpec, ReadOnly, TypeVar
+from typing_extensions import ParamSpec, TypeVar
 
 import litellm
 from litellm import verbose_logger
@@ -868,6 +868,20 @@ def _count_anthropic_content(
     return tokens
 
 
+LOCALLY_COUNTABLE_BLOCK_TYPES: Final = (
+    "text",
+    "image_url",
+    "image",
+    "document",
+    "file",
+    "tool_use",
+    "tool_result",
+    "thinking",
+    "redacted_thinking",
+    "tool_reference",
+)
+
+
 def _count_content_list(
     count_function: TokenCounterFunction,
     content_list: str
@@ -940,9 +954,7 @@ def _count_content_list(
                 content_type = c.get("type", type(c).__name__) if isinstance(c, dict) else type(c).__name__
                 raise ValueError(
                     f"Invalid content item type: {content_type}. "
-                    f"Expected str or dict with 'type' field "
-                    f"(text, image_url, image, document, file, tool_use, tool_result, thinking, redacted_thinking, "
-                    f"tool_reference)."
+                    f"Expected str or dict with 'type' field ({', '.join(LOCALLY_COUNTABLE_BLOCK_TYPES)})."
                 )
         return num_tokens
     except Exception as e:
@@ -1020,8 +1032,7 @@ def _format_type(props, indent):
             return " | ".join([f'"{item}"' for item in props["enum"]])
         return "string"
     elif type == "array":
-        # items is required, OpenAI throws an error if it's missing
-        return f"{_format_type(props['items'], indent)}[]"
+        return f"{_format_type(props.get('items', {}), indent)}[]"
     elif type == "object":
         return f"{{\n{_format_object_parameters(props, indent + 2)}\n}}"
     elif type in ["integer", "number"]:
@@ -1051,24 +1062,6 @@ def _elide_data_key(obj: Mapping[str, object]) -> Mapping[str, object]:
     }
 
 
-def _serialize_part(part: object) -> str:
-    return json.dumps(json.loads(json.dumps(part, default=str), object_hook=_elide_data_key), default=str)
-
-
-_LOCALLY_COUNTABLE_BLOCK_TYPES: Final = frozenset(
-    {
-        "text",
-        "image_url",
-        "image",
-        "document",
-        "file",
-        "tool_use",
-        "tool_result",
-        "thinking",
-        "redacted_thinking",
-        "tool_reference",
-    }
-)
 _OPAQUE_BLOCK_KEYS: Final = frozenset(
     {"id", "tool_use_id", "cache_control", "signature", "encrypted_content", "encrypted_index"}
 )
@@ -1079,11 +1072,11 @@ def _countable_json_node(obj: Mapping[str, object]) -> Mapping[str, object]:
 
 
 def _countable_leaf_block(block: object) -> object:
-    if not isinstance(block, Mapping) or block.get("type") in _LOCALLY_COUNTABLE_BLOCK_TYPES:
+    if not isinstance(block, Mapping) or block.get("type") in LOCALLY_COUNTABLE_BLOCK_TYPES:
         return block
     return {
         "type": "text",
-        "text": json.dumps(json.loads(json.dumps(block, default=str), object_hook=_countable_json_node), default=str),
+        "text": json.dumps(json.loads(json.dumps(block, default=str), object_hook=_countable_json_node)),
     }
 
 
@@ -1102,53 +1095,5 @@ def _countable_message(message: object) -> object:
     }
 
 
-def countable_messages(messages: Sequence[object]) -> tuple[object, ...]:
+def messages_with_uncountable_blocks_as_text(messages: Sequence[object]) -> tuple[object, ...]:
     return tuple(_countable_message(message) for message in messages)
-
-
-def _part_to_text(part: object) -> str:
-    if isinstance(part, Mapping) and isinstance(part.get("text"), str):
-        return part["text"]
-    return _serialize_part(part)
-
-
-def _content_parts(content: Mapping[str, object]) -> tuple[object, ...]:
-    parts: Final = content.get("parts")
-    if isinstance(parts, list):
-        return tuple(parts)
-    return (content,)
-
-
-def content_parts_text(content: Mapping[str, object]) -> str:
-    return "\n".join(_part_to_text(part) for part in _content_parts(content))
-
-
-class _LocalCountMessage(TypedDict):
-    role: ReadOnly[str]
-    content: ReadOnly[str]
-
-
-def _local_count_message(role: str, content: str) -> _LocalCountMessage:
-    message: Final[_LocalCountMessage] = {"role": role, "content": content}
-    return message
-
-
-def contents_as_chat_messages(contents: object) -> tuple[Mapping[str, object], ...] | None:
-    if contents is None:
-        return None
-    if isinstance(contents, list):
-        messages: Final = tuple(
-            _local_count_message(
-                role="assistant" if content.get("role") == "model" else "user",
-                content=content_parts_text(content),
-            )
-            for content in contents
-            if isinstance(content, Mapping)
-        )
-        counted: Final = tuple(message for message in messages if message["content"])
-        if counted:
-            return counted
-    fallback: Final[tuple[Mapping[str, object], ...]] = (
-        _local_count_message(role="user", content=_serialize_part(contents)),
-    )
-    return fallback

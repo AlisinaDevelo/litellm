@@ -4209,6 +4209,9 @@ class LiteLLMLoggingBaseClass:
         pass
 
 
+CountTokensMessageFormat = Literal["openai", "anthropic"]
+
+
 class TokenCountResponse(LiteLLMPydanticObjectBase):
     total_tokens: int
     request_model: str

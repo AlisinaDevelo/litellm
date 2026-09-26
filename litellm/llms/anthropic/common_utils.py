@@ -1610,13 +1610,6 @@ def flatten_unencrypted_web_search_results_in_anthropic_messages(
 
 
 def sanitize_replayed_anthropic_messages(messages: list[_MessageT]) -> list[_MessageT]:  # mutable-ok: list contract
-    """
-    The history sanitizers ``/v1/messages`` runs before dispatching to any provider:
-    drop empty text and thinking blocks, rewrite cross-provider tool ids (e.g.
-    ``functions.Bash:0``) into Anthropic's id pattern, and flatten LiteLLM-synthesized
-    web search results into text. Token counting runs the same steps so its count
-    matches the request that is actually sent.
-    """
     return flatten_unencrypted_web_search_results_in_anthropic_messages(
         sanitize_tool_use_ids_in_anthropic_messages(strip_empty_content_blocks_from_anthropic_messages(messages))
     )

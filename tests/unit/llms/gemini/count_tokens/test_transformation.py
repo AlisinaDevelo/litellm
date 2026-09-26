@@ -1,3 +1,5 @@
+import asyncio
+import base64
 import copy
 import json
 from typing import Final
@@ -5,16 +7,16 @@ from typing import Final
 import httpx
 import pytest
 
+import litellm
 from litellm import Router, acompletion
+from litellm.litellm_core_utils.prompt_templates import image_handling
 from litellm.llms.anthropic.experimental_pass_through.messages import handler as anthropic_messages_handler
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.gemini.common_utils import GoogleAIStudioTokenCounter
 from litellm.llms.gemini.count_tokens.transformation import (
     GeminiCountTokensPayload,
     InvalidCountTokensRequest,
-    _has_anthropic_shape,
     build_count_tokens_payload,
-    native_count_tokens_payload,
 )
 
 _GEMINI_REPLY: Final = {
@@ -42,6 +44,7 @@ _WEATHER_OPENAI: Final = {
     },
 }
 _ASK: Final = {"role": "user", "content": "Use get_weather for Paris."}
+_REMOTE_PNG_URL: Final = "https://img.example.com/cat.png"
 _TOOL_RESULT: Final = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "18C"}]}
 
 
@@ -324,12 +327,55 @@ _MESSAGES_REQUESTS: Final = (
         {"system": "be nice", "messages": [{"role": "user", "content": "hi"}]},
         id="model-without-system-support",
     ),
+    pytest.param(
+        "gemini-2.5-flash",
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+                {"role": "user", "content": "c"},
+            ]
+        },
+        id="assistant-text-blocks-without-other-anthropic-markers",
+    ),
+    pytest.param(
+        "gemini-2.5-flash",
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "text", "text": ""}]},
+                {"role": "user", "content": "again"},
+            ]
+        },
+        id="empty-assistant-text-block",
+    ),
+    pytest.param(
+        "gemini-2.5-flash",
+        {"system": "", "messages": [{"role": "user", "content": "hi"}]},
+        id="empty-system-string",
+    ),
+    pytest.param(
+        "gemini-2.5-flash",
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "image", "source": {"type": "url", "url": _REMOTE_PNG_URL}},
+                    ],
+                }
+            ]
+        },
+        id="https-image-url",
+    ),
 )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("model", "request_body"), _MESSAGES_REQUESTS)
 async def test_count_payload_is_what_v1_messages_sends_to_gemini(local_model_cost_map, model, request_body):
+    image_handling.in_memory_cache.set_cache(_REMOTE_PNG_URL, f"data:image/png;base64,{_PNG}")
     sent: list[dict[str, object]] = []  # mutable-ok: the fake upstream appends each captured body
     await anthropic_messages_handler.anthropic_messages(
         max_tokens=16,
@@ -340,11 +386,12 @@ async def test_count_payload_is_what_v1_messages_sends_to_gemini(local_model_cos
         **copy.deepcopy(request_body),
     )
 
-    payload = build_count_tokens_payload(
+    payload = await build_count_tokens_payload(
         model=model,
         messages=request_body["messages"],
         system=request_body.get("system"),
         tools=request_body.get("tools"),
+        message_format="anthropic",
     )
 
     assert isinstance(payload, GeminiCountTokensPayload), payload
@@ -408,12 +455,37 @@ _CHAT_REQUESTS: Final = (
         },
         id="openai-web-search-tool-with-tool-call-history",
     ),
+    pytest.param(
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+                {"role": "user", "content": "c"},
+            ]
+        },
+        id="assistant-text-parts",
+    ),
+    pytest.param(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "image_url", "image_url": {"url": _REMOTE_PNG_URL}},
+                    ],
+                }
+            ]
+        },
+        id="https-image-url",
+    ),
 )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_body", _CHAT_REQUESTS)
 async def test_count_payload_is_what_chat_completions_sends_to_gemini(local_model_cost_map, request_body):
+    image_handling.in_memory_cache.set_cache(_REMOTE_PNG_URL, f"data:image/png;base64,{_PNG}")
     sent: list[dict[str, object]] = []  # mutable-ok: the fake upstream appends each captured body
     await acompletion(
         model="gemini/gemini-2.5-flash",
@@ -423,11 +495,12 @@ async def test_count_payload_is_what_chat_completions_sends_to_gemini(local_mode
         **copy.deepcopy(request_body),
     )
 
-    payload = build_count_tokens_payload(
+    payload = await build_count_tokens_payload(
         model="gemini-2.5-flash",
         messages=request_body["messages"],
         system=None,
         tools=request_body.get("tools"),
+        message_format="openai",
     )
 
     assert isinstance(payload, GeminiCountTokensPayload), payload
@@ -486,7 +559,7 @@ async def test_count_includes_the_deployment_tools_the_router_sends(
         counted.append(json.loads(request.content)["generateContentRequest"])
         return httpx.Response(200, json={"totalTokens": 7})
 
-    result = await GoogleAIStudioTokenCounter().count_tokens(
+    result = await GoogleAIStudioTokenCounter().count_anthropic_messages_tokens(
         model_to_use="gemini-2.5-flash",
         messages=copy.deepcopy(request_body["messages"]),
         contents=None,
@@ -505,50 +578,23 @@ async def test_count_includes_the_deployment_tools_the_router_sends(
     } == _counted_part_of(sent[-1])
 
 
-def test_build_count_tokens_payload_maps_openai_web_search_tool():
-    payload = build_count_tokens_payload(
+@pytest.mark.asyncio
+async def test_build_count_tokens_payload_maps_openai_web_search_tool():
+    payload = await build_count_tokens_payload(
         model="gemini-2.5-flash",
         messages=[{"role": "user", "content": "hi"}],
         system=None,
         tools=[{"type": "web_search_preview"}],
+        message_format="openai",
     )
 
+    assert isinstance(payload, GeminiCountTokensPayload), payload
     assert payload.tools == ({"googleSearch": {}},)
 
 
-def test_build_count_tokens_payload_routes_openai_tool_types_to_openai_path():
-    payload = build_count_tokens_payload(
-        model="gemini-2.5-flash",
-        messages=[
-            {"role": "user", "content": "check it"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
-                    }
-                ],
-            },
-            {"role": "tool", "content": "sunny", "tool_call_id": "call_1"},
-        ],
-        system=None,
-        tools=[
-            {"type": "web_search_preview"},
-            {"type": "computer_use", "display_width": 1024, "display_height": 768},
-        ],
-    )
-
-    function_call = payload.contents[1]["parts"][0].get("function_call")
-    assert function_call == {"name": "get_weather", "args": {"city": "Paris"}}
-    function_response = payload.contents[2]["parts"][0].get("function_response")
-    assert function_response["name"] == "get_weather"
-
-
-def test_build_count_tokens_payload_wraps_responses_api_tool():
-    payload = build_count_tokens_payload(
+@pytest.mark.asyncio
+async def test_build_count_tokens_payload_wraps_responses_api_tool():
+    payload = await build_count_tokens_payload(
         model="gemini-2.5-flash",
         messages=[{"role": "user", "content": "hi"}],
         system=None,
@@ -559,8 +605,10 @@ def test_build_count_tokens_payload_wraps_responses_api_tool():
                 "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
             }
         ],
+        message_format="openai",
     )
 
+    assert isinstance(payload, GeminiCountTokensPayload), payload
     assert payload.tools is not None
     function_declaration = payload.tools[0]["function_declarations"][0]
     assert function_declaration["name"] == "get_weather"
@@ -570,71 +618,59 @@ def test_build_count_tokens_payload_wraps_responses_api_tool():
     }
 
 
-@pytest.mark.parametrize(
-    "block_type",
-    ["bash_code_execution_tool_result", "text_editor_code_execution_tool_result"],
-)
-def test_anthropic_shape_detection_covers_server_tool_results(block_type):
-    messages = [{"role": "assistant", "content": [{"type": block_type, "tool_use_id": "srv_1", "content": {}}]}]
-
-    assert _has_anthropic_shape(None, None, messages) is True
-
-
-def test_build_count_tokens_payload_rejects_a_tool_result_without_its_tool_call():
-    payload = build_count_tokens_payload(
+@pytest.mark.asyncio
+async def test_build_count_tokens_payload_rejects_a_tool_result_without_its_tool_call():
+    payload = await build_count_tokens_payload(
         model="gemini-2.5-flash",
         messages=[{"role": "user", "content": [{"type": "tool_result", "content": "18C"}]}],
         system=None,
         tools=None,
+        message_format="anthropic",
     )
 
     assert isinstance(payload, InvalidCountTokensRequest)
     assert "Missing corresponding tool call" in payload.message
 
 
-def _native_tools(tools):
-    return native_count_tokens_payload(model="gemini-2.5-flash", contents=[], system=None, tools=tools).tools
-
-
-def test_native_count_tokens_payload_maps_each_tool_shape():
-    assert _native_tools(None) is None
-    assert _native_tools([{"function_declarations": [{"name": "g"}]}]) == ({"function_declarations": [{"name": "g"}]},)
-    assert _native_tools([{"googleSearch": {}}]) == ({"googleSearch": {}},)
-    assert _native_tools([{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]) == (
-        {"function_declarations": [{"name": "f", "parameters": {"type": "object"}}]},
-    )
-    assert _native_tools([{"name": "f", "input_schema": {"type": "object"}}]) == (
-        {"function_declarations": [{"name": "f", "parameters": {"type": "object"}}]},
-    )
-    assert _native_tools([{"googleSearch": {}}, {"type": "function", "function": {"name": "f"}}]) == (
-        {"function_declarations": [{"name": "f"}]},
-    )
-
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("anthropic_tool", "expected"),
-    [
-        ({"type": "web_search_20250305", "name": "web_search"}, {"googleSearch": {}}),
-        ({"type": "web_search", "name": "web_search"}, {"googleSearch": {}}),
-        ({"type": "web_fetch_20250910", "name": "web_fetch"}, {"urlContext": {}}),
-        ({"type": "code_execution_20250825", "name": "code_execution"}, {"codeExecution": {}}),
-    ],
+    ("message_format", "image_block"),
+    (
+        pytest.param(
+            "anthropic", {"type": "image", "source": {"type": "url", "url": "http://img.test/cat"}}, id="anthropic"
+        ),
+        pytest.param("openai", {"type": "image_url", "image_url": {"url": "http://img.test/cat"}}, id="openai"),
+    ),
 )
-def test_native_count_tokens_payload_maps_anthropic_hosted_tools_not_functions(anthropic_tool, expected):
-    tools = _native_tools([anthropic_tool])
+async def test_remote_image_is_fetched_without_blocking_the_event_loop(monkeypatch, message_format, image_block):
+    async def slow_image_host(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.3)
+        return httpx.Response(200, content=base64.b64decode(_PNG), headers={"content-type": "image/png"})
 
-    assert tools == (expected,)
+    image_client = AsyncHTTPHandler()
+    image_client.client = httpx.AsyncClient(transport=httpx.MockTransport(slow_image_host))
+    monkeypatch.setattr(litellm, "module_level_aclient", image_client)
+    monkeypatch.setattr(litellm, "user_url_validation", False)
+    ticks: list[float] = []  # mutable-ok: the ticker records each wake-up time
+    loop = asyncio.get_running_loop()
 
+    async def ticker() -> None:
+        while True:
+            ticks.append(loop.time())
+            await asyncio.sleep(0.01)
 
-def test_native_count_tokens_payload_keeps_contents_and_reads_system_text_or_instruction():
-    contents = [{"role": "user", "parts": [{"text": "hi"}]}]
-    instruction = {"parts": [{"text": "be terse"}]}
+    ticking = asyncio.create_task(ticker())
+    try:
+        payload = await build_count_tokens_payload(
+            model="gemini-2.5-flash",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "describe"}, image_block]}],
+            system=None,
+            tools=None,
+            message_format=message_format,
+        )
+    finally:
+        ticking.cancel()
 
-    from_text = native_count_tokens_payload(model="gemini-2.5-flash", contents=contents, system="be terse", tools=None)
-    from_instruction = native_count_tokens_payload(
-        model="gemini-2.5-flash", contents=contents, system=instruction, tools=None
-    )
-
-    assert from_text.contents == tuple(contents)
-    assert from_text.system_instruction == instruction
-    assert from_instruction.system_instruction == instruction
+    assert isinstance(payload, GeminiCountTokensPayload), payload
+    assert payload.contents[0]["parts"][1]["inline_data"]["data"] == _PNG
+    assert max(later - earlier for earlier, later in zip(ticks, ticks[1:])) < 0.15

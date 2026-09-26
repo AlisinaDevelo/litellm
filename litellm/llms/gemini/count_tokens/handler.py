@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 import litellm
-from litellm.llms.custom_httpx.http_handler import get_async_httpx_client
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, get_async_httpx_client
 from litellm.types.llms.gemini import GeminiCountTokensRequest
 from litellm.types.llms.vertex_ai import ContentType, SystemInstructions, Tools
 from litellm.types.utils import LlmProviders
@@ -14,10 +14,7 @@ if TYPE_CHECKING:
 else:
     GenerateContentContentListUnionDict = Any
 
-# Deployment litellm_params keys that must not be forwarded into acount_tokens:
-# every name here is bound by the method signature or supplied explicitly by the
-# caller, so a deployment carrying one raises TypeError (duplicate keyword) or
-# silently hijacks request wiring (e.g. a stray "client" or "tools").
+# acount_tokens binds these itself, so forwarding a deployment's copy would raise a duplicate-keyword TypeError
 ACOUNT_TOKENS_DEPLOYMENT_RESERVED_KEYS: Final = frozenset({"self", "system_instruction", "tools", "client"})
 
 
@@ -130,7 +127,7 @@ class GoogleAIStudioTokenCounter:
         timeout: float | httpx.Timeout | None = None,
         system_instruction: SystemInstructions | None = None,
         tools: Sequence[Tools] | None = None,
-        client: httpx.AsyncClient | None = None,
+        client: httpx.AsyncClient | AsyncHTTPHandler | None = None,
         **kwargs: object,
     ) -> dict[str, Any]:
         """
@@ -143,6 +140,9 @@ class GoogleAIStudioTokenCounter:
             api_key: Optional Google API key (will fall back to environment)
             api_base: Optional API base URL (defaults to Google Gen AI Studio)
             timeout: Optional timeout for the request
+            system_instruction: Optional system instruction to count with the contents
+            tools: Optional Gemini tools to count with the contents
+            client: Optional HTTP client to send the request with
             **kwargs: Additional parameters
 
         Returns:
@@ -160,70 +160,49 @@ class GoogleAIStudioTokenCounter:
             }
 
         Raises:
-            ValueError: If API key is missing
-            litellm.APIError: If the API call fails
-            litellm.APIConnectionError: If the connection fails
-            Exception: For any other unexpected errors
+            litellm.APIError: If the API returns an error status or a body that is not JSON
+            litellm.APIConnectionError: If the request fails or times out
         """
+        headers, url = await self.validate_environment(
+            api_key=api_key,
+            api_base=api_base,
+            headers={},  # mutable-ok: validate_environment merges into this dict
+            model=model,
+            litellm_params=kwargs,
+        )
+        request_body: Final = build_count_tokens_request(
+            model=model,
+            contents=self._clean_contents_for_gemini_api(contents),
+            system_instruction=system_instruction,
+            tools=tools,
+        )
+        async_httpx_client: Final = client or get_async_httpx_client(llm_provider=LlmProviders.GEMINI)
 
         try:
-            headers, url = await self.validate_environment(
-                api_key=api_key,
-                api_base=api_base,
-                headers={},  # mutable-ok: validate_environment merges into this dict
-                model=model,
-                litellm_params=kwargs,
-            )
-
-            request_body: Final = build_count_tokens_request(
-                model=model,
-                contents=self._clean_contents_for_gemini_api(contents),
-                system_instruction=system_instruction,
-                tools=tools,
-            )
-
-            async_httpx_client: Final = client or get_async_httpx_client(
-                llm_provider=LlmProviders.GEMINI,
-            )
-
             response: Final = await async_httpx_client.post(
                 url=url,
                 headers=headers,
                 json=request_body,  # pyright: ignore[reportArgumentType]  # post() takes a bare dict; a TypedDict is one at runtime
             )
-
-            # Check for HTTP errors
             response.raise_for_status()
-
-            # Parse response
-            try:
-                result: Final = response.json()
-            except ValueError as e:
-                raise litellm.APIError(
-                    message=f"Google Gen AI Studio API returned a non-JSON body: {response.text}",
-                    llm_provider="gemini",
-                    model=model,
-                    status_code=response.status_code,
-                ) from e
-            return result
-
-        except litellm.APIError:
-            raise
         except httpx.HTTPStatusError as e:
-            error_msg = f"Google Gen AI Studio API error: {e.response.status_code} - {e.response.text}"
             raise litellm.APIError(
-                message=error_msg,
+                message=f"Google Gen AI Studio API error: {e.response.status_code} - {e.response.text}",
                 llm_provider="gemini",
                 model=model,
                 status_code=e.response.status_code,
             ) from e
-        except httpx.RequestError as e:
-            error_msg = f"Request to Google Gen AI Studio failed: {e}"
-            raise litellm.APIConnectionError(message=error_msg, llm_provider="gemini", model=model) from e
-        except Exception as e:
+        except (httpx.RequestError, litellm.Timeout) as e:
+            raise litellm.APIConnectionError(
+                message=f"Request to Google Gen AI Studio failed: {e}", llm_provider="gemini", model=model
+            ) from e
+
+        try:
+            return response.json()
+        except ValueError as e:
             raise litellm.APIError(
-                message=f"Unexpected error during token counting: {e}",
+                message=f"Google Gen AI Studio API returned a non-JSON body: {response.text}",
                 llm_provider="gemini",
                 model=model,
-                status_code=500,
+                status_code=502,
             ) from e

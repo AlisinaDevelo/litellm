@@ -3,7 +3,7 @@ import datetime
 import json
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
 
@@ -13,7 +13,11 @@ from litellm.llms.base_llm.base_utils import BaseLLMModelInfo, BaseTokenCounter
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
-from litellm.types.utils import TokenCountResponse
+from litellm.types.llms.vertex_ai import ContentType
+from litellm.types.utils import CountTokensMessageFormat, TokenCountResponse
+
+if TYPE_CHECKING:
+    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
 GEMINI_IMAGE_ASPECT_RATIOS: Final[dict[str, float]] = {
     "1:1": 1 / 1,
@@ -491,7 +495,54 @@ class GoogleAIStudioTokenCounter(BaseTokenCounter):
         request_model: str = "",
         tools: list[dict[str, object]] | None = None,
         system: object | None = None,
-        client: httpx.AsyncClient | None = None,
+        client: "httpx.AsyncClient | AsyncHTTPHandler | None" = None,
+    ) -> TokenCountResponse | None:
+        return await self._count_tokens(
+            model_to_use=model_to_use,
+            messages=messages,
+            contents=contents,
+            deployment=deployment,
+            request_model=request_model,
+            tools=tools,
+            system=system,
+            client=client,
+            message_format="openai",
+        )
+
+    async def count_anthropic_messages_tokens(
+        self,
+        model_to_use: str,
+        messages: list[dict[str, object]] | None,
+        contents: list[dict[str, object]] | None,
+        deployment: dict[str, Any] | None = None,
+        request_model: str = "",
+        tools: list[dict[str, object]] | None = None,
+        system: object | None = None,
+        client: "httpx.AsyncClient | AsyncHTTPHandler | None" = None,
+    ) -> TokenCountResponse | None:
+        return await self._count_tokens(
+            model_to_use=model_to_use,
+            messages=messages,
+            contents=contents,
+            deployment=deployment,
+            request_model=request_model,
+            tools=tools,
+            system=system,
+            client=client,
+            message_format="anthropic",
+        )
+
+    async def _count_tokens(
+        self,
+        model_to_use: str,
+        messages: list[dict[str, object]] | None,
+        contents: list[dict[str, object]] | None,
+        deployment: dict[str, Any] | None,
+        request_model: str,
+        tools: list[dict[str, object]] | None,
+        system: object | None,
+        client: "httpx.AsyncClient | AsyncHTTPHandler | None",
+        message_format: CountTokensMessageFormat,
     ) -> TokenCountResponse | None:
         import copy
 
@@ -500,16 +551,16 @@ class GoogleAIStudioTokenCounter(BaseTokenCounter):
             GoogleAIStudioTokenCounter,
         )
         from litellm.llms.gemini.count_tokens.transformation import (
+            GeminiCountTokensPayload,
             InvalidCountTokensRequest,
             build_count_tokens_payload,
-            native_count_tokens_payload,
         )
 
         if contents is None and not messages:
             return None
 
         def failed(
-            message: str, status_code: int, original_response: dict[str, Any] | None = None
+            message: str, status_code: int, original_response: dict[str, object] | None = None
         ) -> TokenCountResponse:
             return TokenCountResponse(
                 total_tokens=0,
@@ -523,19 +574,21 @@ class GoogleAIStudioTokenCounter(BaseTokenCounter):
             )
 
         litellm_params: Final = (deployment or {}).get("litellm_params", {})
-        counted_tools: Final = (*(litellm_params.get("tools") or ()), *(tools or ())) or None
-        try:
-            payload: Final = (
-                build_count_tokens_payload(
-                    model=model_to_use, messages=messages or (), system=system, tools=counted_tools
-                )
-                if contents is None
-                else native_count_tokens_payload(
-                    model=model_to_use, contents=contents, system=system, tools=counted_tools
-                )
+        payload: Final = (
+            await build_count_tokens_payload(
+                model=model_to_use,
+                messages=messages or (),
+                system=system,
+                tools=(*(litellm_params.get("tools") or ()), *(tools or ())) or None,
+                message_format=message_format,
             )
-        except Exception as e:  # noqa: BLE001  # native-path translation failures are untranslatable input like build_count_tokens_payload's
-            return failed(f"Invalid token count request: {e!r}", 400)
+            if contents is None
+            else GeminiCountTokensPayload(
+                contents=cast("tuple[ContentType, ...]", tuple(contents)),  # cast-ok: native contents pass through
+                system_instruction=None,
+                tools=None,
+            )
+        )
         if isinstance(payload, InvalidCountTokensRequest):
             return failed(payload.message, 400)
         count_tokens_params_request: Final = {

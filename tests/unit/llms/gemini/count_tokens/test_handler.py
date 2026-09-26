@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 import litellm
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.gemini.count_tokens.handler import GoogleAIStudioTokenCounter
 
 COUNT_TOKENS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:countTokens"
@@ -171,20 +172,18 @@ async def test_acount_tokens_non_json_body_raises_api_error_with_response_status
             client=client,
         )
 
-    assert exc_info.value.status_code == 200
+    assert exc_info.value.status_code == 502
     assert "non-JSON" in exc_info.value.message
 
 
 @pytest.mark.asyncio
-async def test_acount_tokens_wraps_unexpected_error_in_api_error():
-    import litellm
-
+async def test_acount_tokens_lets_internal_errors_propagate():
     def _handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("transport exploded")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
 
-    with pytest.raises(litellm.APIError) as excinfo:
+    with pytest.raises(RuntimeError, match="transport exploded"):
         await GoogleAIStudioTokenCounter().acount_tokens(
             model="gemini-2.5-flash",
             contents=[{"role": "user", "parts": [{"text": "hello"}]}],
@@ -192,19 +191,30 @@ async def test_acount_tokens_wraps_unexpected_error_in_api_error():
             client=client,
         )
 
-    assert excinfo.value.status_code == 500
+
+def _timing_out(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("slow upstream", request=request)
+
+
+def _litellm_handler_timing_out() -> AsyncHTTPHandler:
+    handler = AsyncHTTPHandler()
+    handler.client = httpx.AsyncClient(transport=httpx.MockTransport(_timing_out))
+    return handler
 
 
 @pytest.mark.asyncio
-async def test_acount_tokens_wraps_malformed_contents_error_in_api_error():
-    import litellm
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})))
-
-    with pytest.raises(litellm.APIError):
+@pytest.mark.parametrize(
+    "client",
+    (
+        pytest.param(httpx.AsyncClient(transport=httpx.MockTransport(_timing_out)), id="httpx-client"),
+        pytest.param(_litellm_handler_timing_out(), id="litellm-http-handler"),
+    ),
+)
+async def test_acount_tokens_raises_connection_error_on_timeout(client):
+    with pytest.raises(litellm.APIConnectionError):
         await GoogleAIStudioTokenCounter().acount_tokens(
             model="gemini-2.5-flash",
-            contents=5,  # pyright: ignore[reportArgumentType]  # malformed caller input exercises the error boundary
+            contents=[{"role": "user", "parts": [{"text": "hello"}]}],
             api_key="test-key",
             client=client,
         )

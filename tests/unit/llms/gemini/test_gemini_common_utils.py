@@ -164,7 +164,7 @@ class TestGoogleAIStudioTokenCounter:
 
         token_counter = GoogleAIStudioTokenCounter()
 
-        result = await token_counter.count_tokens(
+        result = await token_counter.count_anthropic_messages_tokens(
             model_to_use="gemini-2.5-flash",
             messages=[{"role": "user", "content": "hello world"}],
             contents=None,
@@ -187,6 +187,7 @@ class TestGoogleAIStudioTokenCounter:
 
         assert result is not None
         assert result.total_tokens == 12
+        assert result.tokenizer_type == "gemini_api"
         body = json.loads(recorded[-1].content)
         generate_content_request = body["generateContentRequest"]
         assert generate_content_request["contents"]
@@ -195,7 +196,7 @@ class TestGoogleAIStudioTokenCounter:
         assert generate_content_request["tools"][0]["function_declarations"][0]["name"] == "get_weather"
 
     @pytest.mark.asyncio
-    async def test_count_tokens_passes_system_and_tools_with_native_contents(self):
+    async def test_count_tokens_sends_native_contents_without_deployment_tools(self):
         import httpx
 
         recorded: list = []
@@ -204,26 +205,24 @@ class TestGoogleAIStudioTokenCounter:
             recorded.append(request)
             return httpx.Response(200, json={"totalTokens": 20})
 
-        token_counter = GoogleAIStudioTokenCounter()
-
-        result = await token_counter.count_tokens(
+        contents = [{"role": "user", "parts": [{"text": "hello world"}]}]
+        result = await GoogleAIStudioTokenCounter().count_tokens(
             model_to_use="gemini-2.5-flash",
             messages=None,
-            contents=[{"role": "user", "parts": [{"text": "hello world"}]}],
-            deployment={"litellm_params": {"api_key": "test-key", "api_base": "https://gemini.example.test"}},
+            contents=contents,
+            deployment={
+                "litellm_params": {
+                    "api_key": "test-key",
+                    "tools": [{"type": "function", "function": {"name": "deployment_default_tool"}}],
+                }
+            },
             request_model="gemini/gemini-2.5-flash",
-            system={"parts": [{"text": "You are a helpful assistant"}]},
-            tools=[{"function_declarations": [{"name": "get_weather"}]}],
             client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)),
         )
 
         assert result is not None
         assert result.total_tokens == 20
-        body = json.loads(recorded[-1].content)
-        generate_content_request = body["generateContentRequest"]
-        assert generate_content_request["contents"] == [{"role": "user", "parts": [{"text": "hello world"}]}]
-        assert generate_content_request["systemInstruction"] == {"parts": [{"text": "You are a helpful assistant"}]}
-        assert generate_content_request["tools"][0]["function_declarations"][0]["name"] == "get_weather"
+        assert json.loads(recorded[-1].content) == {"contents": contents}
 
     @pytest.mark.asyncio
     async def test_count_tokens_provider_error_returns_error_response(self):
@@ -289,7 +288,7 @@ class TestGoogleAIStudioTokenCounter:
 
         token_counter = GoogleAIStudioTokenCounter()
 
-        result = await token_counter.count_tokens(
+        result = await token_counter.count_anthropic_messages_tokens(
             model_to_use="gemini-2.5-flash",
             messages=[{"role": "user", "content": [{"type": "tool_result", "content": "18C"}]}],
             contents=None,
@@ -340,25 +339,19 @@ class TestGoogleAIStudioTokenCounter:
 
     @pytest.mark.asyncio
     async def test_count_tokens_connection_error_returns_error_response(self):
-        import litellm
+        import httpx
 
-        token_counter = GoogleAIStudioTokenCounter()
+        def _handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
 
-        with patch(
-            "litellm.llms.gemini.count_tokens.handler.GoogleAIStudioTokenCounter.acount_tokens",
-            new_callable=AsyncMock,
-        ) as mock_acount_tokens:
-            mock_acount_tokens.side_effect = litellm.APIConnectionError(
-                message="connection refused", llm_provider="gemini", model="gemini-2.5-flash"
-            )
-
-            result = await token_counter.count_tokens(
-                model_to_use="gemini-2.5-flash",
-                messages=[{"role": "user", "content": "hello"}],
-                contents=None,
-                deployment=None,
-                request_model="gemini/gemini-2.5-flash",
-            )
+        result = await GoogleAIStudioTokenCounter().count_tokens(
+            model_to_use="gemini-2.5-flash",
+            messages=[{"role": "user", "content": "hello"}],
+            contents=None,
+            deployment={"litellm_params": {"api_key": "test-key"}},
+            request_model="gemini/gemini-2.5-flash",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)),
+        )
 
         assert result is not None
         assert result.error is True
@@ -458,28 +451,11 @@ class TestGoogleAIStudioTokenCounter:
         assert declared_names == counted_tool_names
 
     @pytest.mark.asyncio
-    async def test_count_tokens_native_tools_not_mappings_returns_400_without_http_call(self):
-        token_counter = GoogleAIStudioTokenCounter()
-
-        result = await token_counter.count_tokens(
-            model_to_use="gemini-2.5-flash",
-            messages=None,
-            contents=[{"role": "user", "parts": [{"text": "hi"}]}],
-            deployment={"litellm_params": {"api_key": "test-key"}},
-            request_model="gemini/gemini-2.5-flash",
-            tools=["just-a-string"],
-        )
-
-        assert result is not None
-        assert result.error is True
-        assert result.status_code == 400
-        assert "Invalid token count request" in (result.error_message or "")
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "upstream_json",
         [
             {"totalTokens": "abc"},
+            {"totalTokens": True},
             {"promptTokensDetails": []},
             [{"totalTokens": 5}],
         ],

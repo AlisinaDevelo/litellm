@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from typing_extensions import NotRequired, ReadOnly, Required, TypedDict
 
@@ -30,7 +30,7 @@ class GeminiCountGenerateContentRequest(TypedDict):
     generateContentRequest: ReadOnly[GeminiGenerateContentRequest]
 
 
-GeminiCountTokensRequest = GeminiCountContentsRequest | GeminiCountGenerateContentRequest
+GeminiCountTokensRequest: TypeAlias = GeminiCountContentsRequest | GeminiCountGenerateContentRequest
 
 
 class GeminiFilesState(Enum):
