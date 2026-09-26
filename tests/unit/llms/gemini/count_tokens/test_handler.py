@@ -232,6 +232,22 @@ async def test_acount_tokens_reaches_gemini_without_google_genai_installed(monke
     contents = [
         {"role": "model", "parts": [{"function_call": {"name": "Bash", "args": {"command": "ls"}}}]},
         {"role": "user", "parts": [{"function_response": {"name": "Bash", "response": {"content": "a.txt"}}}]},
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "functionResponse": {
+                        "id": "toolu_1",
+                        "name": "Bash",
+                        "response": {"content": "ok"},
+                        "willContinue": None,
+                    }
+                },
+                "not-a-dict-part",
+            ],
+        },
+        {"role": "user", "parts": [{"functionResponse": "malformed"}]},
+        "not-a-dict-content",
     ]
 
     result = await GoogleAIStudioTokenCounter().acount_tokens(
@@ -242,4 +258,18 @@ async def test_acount_tokens_reaches_gemini_without_google_genai_installed(monke
     )
 
     assert result == {"totalTokens": 7}
-    assert json.loads(recorded[-1].content) == {"contents": contents}
+    assert json.loads(recorded[-1].content) == {
+        "contents": [
+            contents[0],
+            contents[1],
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "Bash", "response": {"content": "ok"}}},
+                    "not-a-dict-part",
+                ],
+            },
+            {"role": "user", "parts": [{"functionResponse": "malformed"}]},
+            "not-a-dict-content",
+        ]
+    }

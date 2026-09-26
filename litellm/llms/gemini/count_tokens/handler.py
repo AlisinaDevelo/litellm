@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Final
+from typing import Any, Final
 
 import httpx
 
@@ -8,11 +8,6 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, get_async_h
 from litellm.types.llms.gemini import GeminiCountTokensRequest
 from litellm.types.llms.vertex_ai import ContentType, SystemInstructions, Tools
 from litellm.types.utils import LlmProviders
-
-if TYPE_CHECKING:
-    from litellm.types.google_genai.main import GenerateContentContentListUnionDict
-else:
-    GenerateContentContentListUnionDict = Any
 
 # acount_tokens binds these itself, so forwarding a deployment's copy would raise a duplicate-keyword TypeError
 ACOUNT_TOKENS_DEPLOYMENT_RESERVED_KEYS: Final = frozenset({"self", "system_instruction", "tools", "client"})
@@ -74,17 +69,19 @@ class GoogleAIStudioTokenCounter:
             return contents
 
         cleaned_contents: Final = copy.deepcopy(contents)
+        if not isinstance(cleaned_contents, list):
+            return cleaned_contents
 
         for content in cleaned_contents:
-            parts = content["parts"]
+            parts = content.get("parts") if isinstance(content, dict) else None
+            if not isinstance(parts, list):
+                continue
             for part in parts:
-                if "functionResponse" in part:
-                    from google.genai.types import FunctionResponse
-
-                    function_response_data = part["functionResponse"]
-                    function_response_part = FunctionResponse(**function_response_data)
-                    function_response_part.id = None
-                    part["functionResponse"] = function_response_part.model_dump(exclude_none=True)
+                function_response = part.get("functionResponse") if isinstance(part, dict) else None
+                if isinstance(function_response, dict):
+                    part["functionResponse"] = {
+                        key: value for key, value in function_response.items() if key != "id" and value is not None
+                    }
 
         return cleaned_contents
 
