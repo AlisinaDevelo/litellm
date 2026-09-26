@@ -20,7 +20,34 @@ This guide provides instructions for building and running the LiteLLM applicatio
 
 ## Building and Running the Application
 
-To build and run the application, you will use the `docker-compose.yml` file located in the root of the project. This file is configured to use the `Dockerfile.non_root` for a secure, non-root container environment.
+To build and run the application, you will use the `docker-compose.yml` file located in the root of the project. It builds the `Dockerfile` in the repository root, the one image LiteLLM ships, which runs as a non-root user by default
+
+## One image, many components
+
+Every LiteLLM container runs the same image. The first word of the container command (or the `LITELLM_COMPONENT` environment variable when the command carries only flags) picks the process the container runs, and everything after it is handed to that process unchanged:
+
+| Component    | Runs                                                | Port |
+|--------------|-----------------------------------------------------|------|
+| `proxy`      | `litellm ...` (everything in one process, default)  | 4000 |
+| `gateway`    | `python -m gateway.launch ...` (inference routes)   | 4000 |
+| `backend`    | `uvicorn backend.main:app ...` (management routes)  | 4001 |
+| `ui`         | nginx serving the static admin UI                   | 3000 |
+| `migrations` | `python migrations/run.py`, `prisma migrate deploy` then exit | |
+| `metrics`    | `python -m litellm.proxy.prometheus_metrics_server ...` | `--port` |
+| `collector`  | `python -m litellm.proxy.collector ...`             | |
+
+```bash
+docker run -p 4000:4000 litellm --config /app/config.yaml         # proxy, exactly as before
+docker run -p 4000:4000 litellm gateway --port 4000               # componentized data plane
+docker run -p 4001:4001 -e LITELLM_COMPONENT=backend litellm      # same, chosen through the env
+docker run -p 3000:3000 --read-only --tmpfs /tmp litellm ui       # admin UI behind nginx
+docker run -e DATABASE_URL=... litellm migrations                 # one-off schema migration job
+docker run -it litellm sh                                         # anything else runs verbatim
+```
+
+PgBouncer is not a separate component: `LITELLM_PGBOUNCER_ENABLED=true` starts an in-container PgBouncer in front of `DATABASE_URL` inside `proxy` and `gateway`. `USE_DDTRACE=true` wraps whichever component runs with `ddtrace-run`, and `PROMETHEUS_MULTIPROC_DIR` is emptied of stale samples before any workers fork
+
+The image runs as uid `65532` (`nonroot` in the Wolfi base) and also works as an arbitrary uid in gid 0, the shape OpenShift `restricted-v2` assigns, because everything it writes at runtime lives under `/app/.cache`, `/var/lib/litellm` and `/tmp`. Mount those (or set `readOnlyRootFilesystem` with emptyDirs there) for a read-only root filesystem. Prisma's CLI and engines are baked under `/opt/prisma`, so migrations need neither network nor a writable home
 
 ### 1. Set the Master Key
 
@@ -44,7 +71,7 @@ docker compose up -d --build
 
 This command will:
 
--   Build the Docker image using `Dockerfile.non_root`.
+-   Build the Docker image from the root `Dockerfile`.
 -   Start the `litellm`, `litellm_db`, and `prometheus` services in detached mode (`-d`).
 -   The `--build` flag ensures that the image is rebuilt if there are any changes to the Dockerfile or the application code.
 
@@ -80,13 +107,12 @@ docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 ```
 
 This setup:
-- Builds from `docker/Dockerfile.non_root` with Prisma engines and Node toolchain baked into the image.
-- Runs the proxy as a non-root user with a read-only rootfs and only writable tmpfs mounts:
-  - `/app/cache` (Prisma/NPM cache; backing `PRISMA_BINARY_CACHE_DIR`, `NPM_CONFIG_CACHE`, `XDG_CACHE_HOME`)
-  - `/app/migrations` (Prisma migration workspace; backing `LITELLM_MIGRATION_DIR`)
-- Pre-builds and serves the admin UI from read-only paths:
-  - `/var/lib/litellm/ui` (pre-restructured Next.js UI with `.litellm_ui_ready` marker)
-  - `/var/lib/litellm/assets` (UI logos and assets)
+- Builds the root `Dockerfile` with Prisma engines and Node toolchain baked into the image.
+- Runs the proxy as an arbitrary non-root uid with a read-only rootfs and only writable tmpfs mounts:
+  - `/tmp`
+  - `/app/.cache` (Prisma/NPM cache under `HOME`)
+  - `/app/migrations-out` (Prisma migration workspace; backing `LITELLM_MIGRATION_DIR`)
+- Pre-builds and serves the admin UI from `/var/lib/litellm/ui` (with the `.litellm_ui_ready` marker) and `/var/lib/litellm/assets`.
 - Routes all outbound traffic through a local Squid proxy that denies egress, so Prisma migrations must use the cached CLI and engines.
 
 You should also verify offline Prisma behaviour with:

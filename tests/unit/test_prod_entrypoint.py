@@ -1,5 +1,5 @@
-"""Unit tests for `docker/component_entrypoint.sh` and its wiring into the
-componentized `gateway` / `backend` images and Terraform deployments."""
+"""Unit tests for `docker/prod_entrypoint.sh`, the component dispatcher every shipped
+container runs, and for the Terraform launch commands that must agree with it."""
 
 import json
 import os
@@ -11,15 +11,13 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-COMPONENT_ENTRYPOINT = REPO_ROOT / "docker" / "component_entrypoint.sh"
 PROD_ENTRYPOINT = REPO_ROOT / "docker" / "prod_entrypoint.sh"
-GATEWAY_DOCKERFILE = REPO_ROOT / "gateway" / "Dockerfile"
-BACKEND_DOCKERFILE = REPO_ROOT / "backend" / "Dockerfile"
-BUILD_FROM_PIP_DOCKERFILE = REPO_ROOT / "docker" / "build_from_pip" / "Dockerfile.build_from_pip"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
 TERRAFORM_ECS = REPO_ROOT / "terraform" / "litellm" / "aws" / "ecs.tf"
 TERRAFORM_CLOUDRUN = REPO_ROOT / "terraform" / "litellm" / "gcp" / "cloudrun.tf"
 
-IMAGE_ENTRYPOINT_PATH = "/app/docker/component_entrypoint.sh"
+IMAGE_ENTRYPOINT_PATH = "/app/docker/prod_entrypoint.sh"
+STUBBED_EXECUTABLES = ("ddtrace-run", "uvicorn", "python", "litellm", "nginx")
 
 TRUTHY_USE_DDTRACE = ("true", "True", "TRUE", "tRuE")
 FALSY_USE_DDTRACE = (None, "", "false", "False", "1", "yes", "on", "truex")
@@ -37,7 +35,6 @@ _STUB_TEMPLATE = """#!/bin/sh
 
 _ENTRYPOINT_RE = re.compile(r"^ENTRYPOINT\s+(\[.*\])\s*$", re.MULTILINE)
 _CMD_RE = re.compile(r"^CMD\s+(\[.*\])\s*$", re.MULTILINE)
-_COPY_RE = re.compile(r"^COPY\s+(?!--from)(\S+)\s+(\S+)\s*$", re.MULTILINE)
 _APP_TARGET_RE = re.compile(r"(?:gateway|backend)\.main:app|gateway\.launch")
 _TF_STRING_LOCAL_RE = re.compile(r'^\s*(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"\s*$', re.MULTILINE)
 _TF_INTERPOLATION_RE = re.compile(r"\$\{(local|var)\.(\w+)\}")
@@ -58,53 +55,39 @@ def _write_stubs(bin_dir: Path, names: tuple[str, ...]) -> None:
         stub.chmod(0o755)
 
 
-def _run_entrypoint(
-    script: Path,
-    argv: tuple[str, ...],
-    use_ddtrace: str | None,
-    tmp_path: Path,
-) -> tuple[str, ...]:
-    """Run `script` with stubbed executables on PATH and return the recorded lines."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(parents=True)
-    _write_stubs(bin_dir, ("ddtrace-run", "uvicorn", "python", "litellm"))
-    record = tmp_path / "record.txt"
-
-    env = {
-        **os.environ,
+def _entrypoint_env(bin_dir: Path, record: Path, overrides: dict[str, str | None]) -> dict[str, str]:
+    """The container-like environment the entrypoint runs under, with `overrides` applied (None unsets)."""
+    cleared = ("USE_DDTRACE", "DD_TRACE_OPENAI_ENABLED", "LITELLM_COMPONENT", "NUM_WORKERS", *overrides)
+    return {
+        **{k: v for k, v in os.environ.items() if k not in cleared},
+        **{k: v for k, v in overrides.items() if v is not None},
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "RECORD": str(record),
         "PYTHONPATH": PYTHONPATH_SENTINEL,
     }
-    env.pop("USE_DDTRACE", None)
-    env.pop("DD_TRACE_OPENAI_ENABLED", None)
-    if use_ddtrace is not None:
-        env["USE_DDTRACE"] = use_ddtrace
 
-    result = subprocess.run(
-        ["sh", str(script), *argv],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+
+def _run_entrypoint(
+    argv: tuple[str, ...],
+    tmp_path: Path,
+    use_ddtrace: str | None = None,
+    **overrides: str | None,
+) -> tuple[str, ...]:
+    """Run the entrypoint with stubbed executables on PATH and return the recorded lines."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    _write_stubs(bin_dir, STUBBED_EXECUTABLES)
+    record = tmp_path / "record.txt"
+    env = _entrypoint_env(bin_dir, record, {"USE_DDTRACE": use_ddtrace, **overrides})
+
+    result = subprocess.run(["sh", str(PROD_ENTRYPOINT), *argv], env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
     return tuple(record.read_text().splitlines()) if record.exists() else ()
 
 
 def _run_shell_command(command: str, bin_dir: Path, record: Path, use_ddtrace: str | None) -> tuple[str, ...]:
     """Run a resolved Terraform launch command through `sh -c` and return the recorded lines."""
-    env = {
-        **os.environ,
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "RECORD": str(record),
-        "PYTHONPATH": PYTHONPATH_SENTINEL,
-    }
-    env.pop("USE_DDTRACE", None)
-    env.pop("DD_TRACE_OPENAI_ENABLED", None)
-    if use_ddtrace is not None:
-        env["USE_DDTRACE"] = use_ddtrace
-
+    env = _entrypoint_env(bin_dir, record, {"USE_DDTRACE": use_ddtrace})
     result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
     return tuple(record.read_text().splitlines()) if record.exists() else ()
@@ -131,29 +114,137 @@ def _resolve_tf_local(terraform_file: Path, name: str) -> str:
 def _entrypoint_argv(dockerfile: Path) -> tuple[str, ...]:
     matches = _ENTRYPOINT_RE.findall(dockerfile.read_text())
     assert matches, f"no exec-form ENTRYPOINT found in {dockerfile}"
-    parsed = json.loads(matches[-1])
-    return tuple(str(part) for part in parsed)
-
-
-def _cmd_argv(dockerfile: Path) -> tuple[str, ...]:
-    matches = _CMD_RE.findall(dockerfile.read_text())
-    assert matches, f"no exec-form CMD found in {dockerfile}"
     return tuple(str(part) for part in json.loads(matches[-1]))
 
 
-def test_ddtrace_enabled_wraps_the_command_and_disables_the_openai_integration(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "argv, expected_exec, expected_args",
+    [
+        (("proxy", "--config", "/app/config.yaml"), "exec=litellm", "args=--config /app/config.yaml"),
+        (("gateway",), "exec=python", "args=-m gateway.launch --workers 1 --host 0.0.0.0 --port 4000"),
+        (
+            ("gateway", "--port", "8080"),
+            "exec=python",
+            "args=-m gateway.launch --workers 1 --host 0.0.0.0 --port 4000 --port 8080",
+        ),
+        (("backend",), "exec=uvicorn", "args=backend.main:app --host 0.0.0.0 --port 4001"),
+        (("backend", "--port", "9001"), "exec=uvicorn", "args=backend.main:app --host 0.0.0.0 --port 4001 --port 9001"),
+        (("ui",), "exec=nginx", "args=-g daemon off;"),
+        (("migrations",), "exec=python", "args=/app/migrations/run.py"),
+        (("metrics", "--port", "9090"), "exec=python", "args=-m litellm.proxy.prometheus_metrics_server --port 9090"),
+        (("collector",), "exec=python", "args=-m litellm.proxy.collector"),
+    ],
+)
+def test_the_first_argument_selects_the_component(
+    argv: tuple[str, ...], expected_exec: str, expected_args: str, tmp_path: Path
 ) -> None:
+    recorded = _run_entrypoint(argv, tmp_path)
+
+    assert recorded[:2] == (expected_exec, expected_args)
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        ((), ("exec=litellm", "args=")),
+        (("--port", "4000"), ("exec=litellm", "args=--port 4000")),
+        (
+            ("--config", "/app/config.yaml", "--detailed_debug"),
+            ("exec=litellm", "args=--config /app/config.yaml --detailed_debug"),
+        ),
+    ],
+)
+def test_flags_alone_still_run_the_monolithic_proxy(
+    argv: tuple[str, ...], expected: tuple[str, str], tmp_path: Path
+) -> None:
+    """Every `docker run litellm --config ...` written before components existed keeps working."""
+    assert _run_entrypoint(argv, tmp_path)[:2] == expected
+
+
+def test_the_dockerfile_leaves_the_command_empty_so_the_env_var_can_pick_the_component(tmp_path: Path) -> None:
+    """A CMD naming a component would beat LITELLM_COMPONENT, and the proxy already listens on 4000 with no flags."""
+    dockerfile_text = DOCKERFILE.read_text()
+    assert _entrypoint_argv(DOCKERFILE) == (IMAGE_ENTRYPOINT_PATH,), "the image ENTRYPOINT must be the bare dispatcher"
+    assert not _CMD_RE.search(dockerfile_text), "the Dockerfile must not set a CMD"
+
+    assert _run_entrypoint((), tmp_path)[:2] == ("exec=litellm", "args=")
+
+
+@pytest.mark.parametrize(
+    "component, argv, expected_exec, expected_args",
+    [
+        ("backend", (), "exec=uvicorn", "args=backend.main:app --host 0.0.0.0 --port 4001"),
+        (
+            "gateway",
+            ("--port", "4100"),
+            "exec=python",
+            "args=-m gateway.launch --workers 1 --host 0.0.0.0 --port 4000 --port 4100",
+        ),
+        ("ui", (), "exec=nginx", "args=-g daemon off;"),
+    ],
+)
+def test_litellm_component_env_selects_the_component_when_the_command_has_none(
+    component: str, argv: tuple[str, ...], expected_exec: str, expected_args: str, tmp_path: Path
+) -> None:
+    """Helm and Compose can pick the component with an env var and keep `args` for the process flags."""
+    recorded = _run_entrypoint(argv, tmp_path, LITELLM_COMPONENT=component)
+
+    assert recorded[:2] == (expected_exec, expected_args)
+
+
+def test_an_explicit_component_argument_beats_the_env_var(tmp_path: Path) -> None:
+    recorded = _run_entrypoint(("backend",), tmp_path, LITELLM_COMPONENT="gateway")
+
+    assert recorded[0] == "exec=uvicorn"
+
+
+def test_the_gateway_honours_num_workers(tmp_path: Path) -> None:
+    recorded = _run_entrypoint(("gateway",), tmp_path, NUM_WORKERS="4")
+
+    assert recorded[1] == "args=-m gateway.launch --workers 4 --host 0.0.0.0 --port 4000"
+
+
+def test_an_unknown_first_word_is_run_as_the_command(tmp_path: Path) -> None:
+    """`docker run <image> sh -c ...` and `kubectl exec`-style overrides bypass the dispatcher."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_stubs(bin_dir, ("some-tool",))
+    record = tmp_path / "record.txt"
+    env = _entrypoint_env(bin_dir, record, {})
+
+    result = subprocess.run(
+        ["sh", str(PROD_ENTRYPOINT), "some-tool", "--flag"], env=env, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
+    assert record.read_text().splitlines()[:2] == ["exec=some-tool", "args=--flag"]
+
+
+def test_an_unknown_litellm_component_fails_fast_instead_of_guessing(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_stubs(bin_dir, STUBBED_EXECUTABLES)
+    record = tmp_path / "record.txt"
+    env = _entrypoint_env(bin_dir, record, {"LITELLM_COMPONENT": "gatway"})
+
+    result = subprocess.run(["sh", str(PROD_ENTRYPOINT)], env=env, capture_output=True, text=True, check=False)
+
+    assert result.returncode == 64
+    assert "gatway" in result.stderr
+    assert not record.exists(), "nothing may be exec'd when the component is unknown"
+
+
+def test_ddtrace_enabled_wraps_the_command_and_disables_the_openai_integration(tmp_path: Path) -> None:
     """`USE_DDTRACE=true` must prefix the command with `ddtrace-run`, turn the openai
     integration off, and leave PYTHONPATH alone.
 
     `ddtrace-run` installs its instrumentation by PREPENDING a bootstrap directory to
-    PYTHONPATH, and the images set PYTHONPATH=/app so the app package is importable. A
-    wrapper that assigned PYTHONPATH instead of inheriting it would either drop the
-    bootstrap (silently disabling tracing) or drop /app (breaking the import), so the
-    recorded value is asserted verbatim.
+    PYTHONPATH, and the image sets PYTHONPATH=/app so the component packages are
+    importable. A wrapper that assigned PYTHONPATH instead of inheriting it would either
+    drop the bootstrap (silently disabling tracing) or drop /app (breaking the import), so
+    the recorded value is asserted verbatim.
 
-    PYTHONPATH_SENTINEL deliberately differs from the images' own /app: with /app as the
+    PYTHONPATH_SENTINEL deliberately differs from the image's own /app: with /app as the
     fixture value, a wrapper that overwrote PYTHONPATH with /app would still satisfy this
     assertion and the check would prove nothing.
 
@@ -161,32 +252,22 @@ def test_ddtrace_enabled_wraps_the_command_and_disables_the_openai_integration(
     it before any litellm code runs, so litellm's in-process `patch_all(..., openai=False)`
     can no longer suppress it; leaving it on double-reports every LLM call.
     """
-    recorded = _run_entrypoint(
-        COMPONENT_ENTRYPOINT,
-        ("uvicorn", "gateway.main:app", "--workers", "2", "--port", "4000"),
-        use_ddtrace="true",
-        tmp_path=tmp_path,
-    )
+    recorded = _run_entrypoint(("gateway",), tmp_path, use_ddtrace="true", NUM_WORKERS="2")
 
     assert recorded == (
         "exec=ddtrace-run",
-        "args=uvicorn gateway.main:app --workers 2 --port 4000",
+        "args=python -m gateway.launch --workers 2 --host 0.0.0.0 --port 4000",
         "DD_TRACE_OPENAI_ENABLED=False",
         f"PYTHONPATH={PYTHONPATH_SENTINEL}",
     )
 
 
 def test_ddtrace_disabled_execs_the_command_directly(tmp_path: Path) -> None:
-    recorded = _run_entrypoint(
-        COMPONENT_ENTRYPOINT,
-        ("uvicorn", "backend.main:app", "--port", "4001"),
-        use_ddtrace=None,
-        tmp_path=tmp_path,
-    )
+    recorded = _run_entrypoint(("backend", "--workers", "2"), tmp_path)
 
     assert recorded == (
         "exec=uvicorn",
-        "args=backend.main:app --port 4001",
+        "args=backend.main:app --host 0.0.0.0 --port 4001 --workers 2",
         "DD_TRACE_OPENAI_ENABLED=<unset>",
         f"PYTHONPATH={PYTHONPATH_SENTINEL}",
     )
@@ -196,35 +277,24 @@ def test_ddtrace_disabled_execs_the_command_directly(tmp_path: Path) -> None:
     "use_ddtrace, traced",
     [*((v, True) for v in TRUTHY_USE_DDTRACE), *((v, False) for v in FALSY_USE_DDTRACE)],
 )
-def test_gating_matches_the_monolithic_entrypoint_and_get_secret_bool(
+def test_ddtrace_gating_matches_get_secret_bool_for_every_component(
     use_ddtrace: str | None, traced: bool, tmp_path: Path
 ) -> None:
-    """Both entrypoints must accept exactly the spellings `get_secret_bool` accepts.
+    """The shell gate must accept exactly the spellings `get_secret_bool` accepts.
 
     `ProxyStartupEvent._init_dd_tracer` reads `USE_DDTRACE` through `get_secret_bool`, which
     matches `true` case-insensitively. If the shell gate were stricter, `USE_DDTRACE=True` would
     give in-process LLM spans without `ddtrace-run` HTTP spans, a half-enabled state.
     """
-    component = _run_entrypoint(
-        COMPONENT_ENTRYPOINT,
-        ("uvicorn", "gateway.main:app"),
-        use_ddtrace=use_ddtrace,
-        tmp_path=tmp_path / "component",
-    )
-    monolith = _run_entrypoint(
-        PROD_ENTRYPOINT,
-        ("--port", "4000"),
-        use_ddtrace=use_ddtrace,
-        tmp_path=tmp_path / "monolith",
-    )
+    component = _run_entrypoint(("gateway",), tmp_path / "component", use_ddtrace=use_ddtrace)
+    monolith = _run_entrypoint(("--port", "4000"), tmp_path / "monolith", use_ddtrace=use_ddtrace)
 
-    expected_exec = "exec=ddtrace-run" if traced else "exec=uvicorn"
     expected_openai = "DD_TRACE_OPENAI_ENABLED=False" if traced else "DD_TRACE_OPENAI_ENABLED=<unset>"
-    assert component[0] == expected_exec
+    assert component[0] == ("exec=ddtrace-run" if traced else "exec=python")
     assert component[2] == expected_openai
     assert monolith[0] == ("exec=ddtrace-run" if traced else "exec=litellm")
-    assert monolith[2] == expected_openai
     assert monolith[1] == ("args=litellm --port 4000" if traced else "args=--port 4000")
+    assert monolith[2] == expected_openai
 
 
 def test_wipes_the_prometheus_multiproc_dir_before_uvicorn_forks(tmp_path: Path) -> None:
@@ -236,165 +306,18 @@ def test_wipes_the_prometheus_multiproc_dir_before_uvicorn_forks(tmp_path: Path)
     (multiproc_dir / "counter_7.db").write_bytes(b"stale")
     (multiproc_dir / "keep.txt").write_text("not a sample")
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_stubs(bin_dir, ("uvicorn",))
-    record = tmp_path / "record.txt"
-    env = {
-        **os.environ,
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "RECORD": str(record),
-        "PROMETHEUS_MULTIPROC_DIR": str(multiproc_dir),
-    }
-    env.pop("USE_DDTRACE", None)
-    result = subprocess.run(
-        ["sh", str(COMPONENT_ENTRYPOINT), "uvicorn", "gateway.main:app"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    recorded = _run_entrypoint(("gateway",), tmp_path, PROMETHEUS_MULTIPROC_DIR=str(multiproc_dir))
 
-    assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
     assert sorted(p.name for p in multiproc_dir.iterdir()) == ["keep.txt"]
-    assert record.read_text().splitlines()[0] == "exec=uvicorn"
+    assert recorded[0] == "exec=python"
 
 
 def test_creates_a_missing_prometheus_multiproc_dir(tmp_path: Path) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_stubs(bin_dir, ("uvicorn",))
     missing = tmp_path / "multiproc"
-    env = {
-        **os.environ,
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "RECORD": str(tmp_path / "record.txt"),
-        "PROMETHEUS_MULTIPROC_DIR": str(missing),
-    }
-    env.pop("USE_DDTRACE", None)
-    result = subprocess.run(
-        ["sh", str(COMPONENT_ENTRYPOINT), "uvicorn", "gateway.main:app"], env=env, capture_output=True, text=True
-    )
 
-    assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
+    _run_entrypoint(("backend",), tmp_path, PROMETHEUS_MULTIPROC_DIR=str(missing))
+
     assert missing.is_dir()
-
-
-def _copied_script(dockerfile: Path, image_path: str) -> Path:
-    """Resolve the repo file a Dockerfile `COPY`s to `image_path`, so tests run what the image ships."""
-    matches = _COPY_RE.findall(dockerfile.read_text())
-    sources = tuple(src for src, dst in matches if dst == image_path)
-    assert sources, f"{dockerfile} never COPYs anything to {image_path}"
-    source = REPO_ROOT / sources[-1]
-    assert source.is_file(), f"{dockerfile} COPYs {sources[-1]}, which does not exist in the build context"
-    return source
-
-
-@pytest.mark.parametrize(
-    "use_ddtrace, traced",
-    [*((v, True) for v in TRUTHY_USE_DDTRACE), *((v, False) for v in FALSY_USE_DDTRACE)],
-)
-def test_build_from_pip_image_launches_litellm_through_the_prod_entrypoint(
-    use_ddtrace: str | None, traced: bool, tmp_path: Path
-) -> None:
-    """Run the build_from_pip image's ENTRYPOINT + CMD through the script it actually COPYs.
-
-    The image used to `ENTRYPOINT ["litellm"]`, so `USE_DDTRACE` was inert there at any spelling.
-    Resolving the ENTRYPOINT path back to its COPY source and executing it with the Dockerfile's
-    CMD checks the launch the container performs, not just that the Dockerfile mentions the script.
-    """
-    entrypoint = _entrypoint_argv(BUILD_FROM_PIP_DOCKERFILE)
-    assert len(entrypoint) == 1, (
-        f"{BUILD_FROM_PIP_DOCKERFILE} ENTRYPOINT must be the bare script so CMD reaches litellm"
-    )
-    script = _copied_script(BUILD_FROM_PIP_DOCKERFILE, entrypoint[0])
-    assert script == PROD_ENTRYPOINT, f"{BUILD_FROM_PIP_DOCKERFILE} bypasses the ddtrace-aware entrypoint"
-    assert f"chmod +x {entrypoint[0]}" in BUILD_FROM_PIP_DOCKERFILE.read_text()
-
-    cmd = _cmd_argv(BUILD_FROM_PIP_DOCKERFILE)
-    recorded = _run_entrypoint(script, cmd, use_ddtrace=use_ddtrace, tmp_path=tmp_path)
-
-    cmd_str = " ".join(cmd)
-    assert recorded == (
-        "exec=ddtrace-run" if traced else "exec=litellm",
-        f"args=litellm {cmd_str}" if traced else f"args={cmd_str}",
-        "DD_TRACE_OPENAI_ENABLED=False" if traced else "DD_TRACE_OPENAI_ENABLED=<unset>",
-        f"PYTHONPATH={PYTHONPATH_SENTINEL}",
-    )
-
-
-def test_entrypoint_script_is_executable() -> None:
-    mode = COMPONENT_ENTRYPOINT.stat().st_mode
-    assert mode & stat.S_IXUSR, "entrypoint must be committed executable to run as the image ENTRYPOINT"
-    assert mode & stat.S_IXOTH, "entrypoint must be executable by the unprivileged `nonroot` user"
-
-
-def test_entrypoint_script_has_no_carriage_returns() -> None:
-    assert b"\r" not in COMPONENT_ENTRYPOINT.read_bytes()
-
-
-@pytest.mark.parametrize(
-    "dockerfile, launcher",
-    [
-        (GATEWAY_DOCKERFILE, "python -m gateway.launch"),
-        (BACKEND_DOCKERFILE, "uvicorn backend.main:app"),
-    ],
-)
-def test_component_images_launch_uvicorn_through_the_entrypoint(dockerfile: Path, launcher: str) -> None:
-    entrypoint = " ".join(_entrypoint_argv(dockerfile))
-
-    assert IMAGE_ENTRYPOINT_PATH in entrypoint, f"{dockerfile} bypasses the ddtrace-aware entrypoint"
-    assert launcher in entrypoint
-    assert entrypoint.index(IMAGE_ENTRYPOINT_PATH) < entrypoint.index(launcher), (
-        f"{dockerfile} must invoke uvicorn through the entrypoint, not the other way around"
-    )
-
-
-@pytest.mark.parametrize(
-    "use_ddtrace, num_workers, expected_exec, expected_args",
-    [
-        (None, "4", "exec=python", "args=-m gateway.launch --workers 4 --host 0.0.0.0 --port 4000"),
-        (None, None, "exec=python", "args=-m gateway.launch --workers 1 --host 0.0.0.0 --port 4000"),
-        ("true", "4", "exec=ddtrace-run", "args=python -m gateway.launch --workers 4 --host 0.0.0.0 --port 4000"),
-    ],
-)
-def test_gateway_image_execs_the_supervisor_with_its_worker_count(
-    use_ddtrace: str | None, num_workers: str | None, expected_exec: str, expected_args: str, tmp_path: Path
-) -> None:
-    """Run the gateway image's ENTRYPOINT + CMD and record what the container execs.
-
-    The Dockerfile's `/app/...` script path is resolved to the checked-in script and `python`
-    is stubbed on PATH, so the assertion is on the argv `gateway.launch` receives, not on the
-    Dockerfile text.
-    """
-    entrypoint = tuple(
-        part.replace(IMAGE_ENTRYPOINT_PATH, str(COMPONENT_ENTRYPOINT)) for part in _entrypoint_argv(GATEWAY_DOCKERFILE)
-    )
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(parents=True)
-    _write_stubs(bin_dir, ("ddtrace-run", "python", "uvicorn"))
-    record = tmp_path / "record.txt"
-    overrides = {"USE_DDTRACE": use_ddtrace, "NUM_WORKERS": num_workers}
-    env = {
-        **{k: v for k, v in os.environ.items() if k not in ("DD_TRACE_OPENAI_ENABLED", *overrides)},
-        **{k: v for k, v in overrides.items() if v is not None},
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "RECORD": str(record),
-        "PYTHONPATH": PYTHONPATH_SENTINEL,
-    }
-
-    result = subprocess.run(
-        [*entrypoint, *_cmd_argv(GATEWAY_DOCKERFILE)], env=env, capture_output=True, text=True, check=False
-    )
-
-    assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
-    assert tuple(record.read_text().splitlines())[:2] == (expected_exec, expected_args)
-
-
-@pytest.mark.parametrize("dockerfile", [GATEWAY_DOCKERFILE, BACKEND_DOCKERFILE])
-def test_component_images_make_the_entrypoint_executable(dockerfile: Path) -> None:
-    body = dockerfile.read_text()
-    assert "chmod +x docker/component_entrypoint.sh" in body
 
 
 @pytest.mark.parametrize("terraform_file", TERRAFORM_LAUNCH_SITES, ids=lambda p: p.parent.name)
@@ -403,14 +326,14 @@ def test_component_images_make_the_entrypoint_executable(dockerfile: Path) -> No
 def test_terraform_launch_command_matches_the_script_contract(
     terraform_file: Path, component: str, use_ddtrace: str | None, tmp_path: Path
 ) -> None:
-    """The Terraform command and `docker/component_entrypoint.sh` must decide identically.
+    """The Terraform command and `docker/prod_entrypoint.sh <component>` must decide identically.
 
     The decision deliberately lives in two places. The script is what the image ENTRYPOINT runs;
     the Terraform strings are what runs when a deployment overrides that ENTRYPOINT, and they
     cannot call the script because the caller supplies the image tag and it may predate the file.
-    Both modules default to a tag that does. So instead of asserting a shared path, this runs both
-    implementations under the same environment and asserts they agree on which binary is exec'd
-    and on whether the openai integration is disabled.
+    So instead of asserting a shared path, this runs both implementations under the same
+    environment and asserts they agree on which binary is exec'd and on whether the openai
+    integration is disabled.
     """
     launcher = COMPONENT_LAUNCHERS[component]
     app_target = " ".join(launcher[1:])
@@ -421,18 +344,14 @@ def test_terraform_launch_command_matches_the_script_contract(
     _write_stubs(bin_dir, ("ddtrace-run", "uvicorn", "python"))
     from_terraform = _run_shell_command(command, bin_dir, tmp_path / "terraform.txt", use_ddtrace)
 
-    from_script = _run_entrypoint(
-        COMPONENT_ENTRYPOINT,
-        launcher,
-        use_ddtrace=use_ddtrace,
-        tmp_path=tmp_path / "script",
-    )
+    from_script = _run_entrypoint((component,), tmp_path / "script", use_ddtrace=use_ddtrace)
 
     assert from_terraform[0] == from_script[0], (
         f"{terraform_file} disagrees with the script on USE_DDTRACE={use_ddtrace}"
     )
     assert from_terraform[2] == from_script[2], f"{terraform_file} disagrees with the script on the openai integration"
     assert app_target in from_terraform[1]
+    assert app_target in from_script[1]
     assert "gateway.main:app" not in from_terraform[1], f"{terraform_file} bypasses the gateway.launch supervisor"
 
     if use_ddtrace in TRUTHY_USE_DDTRACE:
@@ -478,9 +397,11 @@ def test_terraform_does_not_depend_on_the_entrypoint_script(terraform_file: Path
     )
 
 
-def test_gateway_keeps_its_worker_count_and_backend_keeps_a_single_process() -> None:
-    gateway = " ".join(_entrypoint_argv(GATEWAY_DOCKERFILE)) + " " + " ".join(_cmd_argv(GATEWAY_DOCKERFILE))
-    backend = " ".join(_entrypoint_argv(BACKEND_DOCKERFILE)) + " " + " ".join(_cmd_argv(BACKEND_DOCKERFILE))
+def test_entrypoint_script_is_executable() -> None:
+    mode = PROD_ENTRYPOINT.stat().st_mode
+    assert mode & stat.S_IXUSR, "entrypoint must be committed executable to run as the image ENTRYPOINT"
+    assert mode & stat.S_IXOTH, "entrypoint must be executable by the unprivileged `nonroot` user"
 
-    assert "--workers" in gateway and "NUM_WORKERS" in gateway
-    assert "--workers" not in backend and "NUM_WORKERS" not in backend
+
+def test_entrypoint_script_has_no_carriage_returns() -> None:
+    assert b"\r" not in PROD_ENTRYPOINT.read_bytes()

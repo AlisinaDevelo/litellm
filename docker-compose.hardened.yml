@@ -4,34 +4,29 @@ services:
   litellm:
     build:
       context: .
-      dockerfile: docker/Dockerfile.non_root
+      dockerfile: Dockerfile
       target: runtime
-      args:
-        PROXY_EXTRAS_SOURCE: "local"
     depends_on:
       - squid
-    user: "101:101"
-    group_add:
-      - "2345"
+    user: "101:0"
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /app/cache:rw,noexec,nosuid,nodev,size=128m,uid=101,gid=101,mode=1777
-      - /app/migrations:rw,noexec,nosuid,nodev,size=64m,uid=101,gid=101,mode=1777
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /app/.cache:rw,noexec,nosuid,nodev,size=128m,uid=101,gid=0,mode=1777
+      - /app/migrations-out:rw,noexec,nosuid,nodev,size=64m,uid=101,gid=0,mode=1777
     volumes:
       - ./proxy_server_config.yaml:/app/config.yaml:ro
     environment:
-      LITELLM_NON_ROOT: "true"
-      PRISMA_BINARY_CACHE_DIR: "/app/cache/prisma-python/binaries"
-      XDG_CACHE_HOME: "/app/cache"
-      LITELLM_MIGRATION_DIR: "/app/migrations"
+      LITELLM_MIGRATION_DIR: "/app/migrations-out"
       HTTP_PROXY: "http://squid:3128"
       HTTPS_PROXY: "http://squid:3128"
       NO_PROXY: "localhost,127.0.0.1,db"
     command:
+      - "proxy"
       - "--port"
       - "4000"
       - "--config"
